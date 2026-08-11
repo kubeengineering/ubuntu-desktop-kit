@@ -91,6 +91,7 @@ PKGS=(
     gpick xclip xsel mat2 pipx gnome-keyring
     xdg-desktop-portal-gtk lm-sensors gir1.2-gtop-2.0 neofetch gnome-calendar
     fonts-jetbrains-mono
+    copyq gnome-sushi fzf zoxide tealdeer
 )
 if $APT install -y "${PKGS[@]}" >>"$LOG" 2>&1; then
     ok "установлены все ${#PKGS[@]}"
@@ -410,6 +411,32 @@ chmod +x "$BIN"/weather-line "$BIN"/conky-recolor "$BIN"/setwall \
          "$BIN"/powermenu "$BIN"/wifimenu "$BIN"/pickcolor "$BIN"/cleanmeta
 ok "setwall, weather-line, conky-recolor, powermenu, wifimenu, pickcolor, cleanmeta"
 
+# ─────────────────────────────────────────────── мелочи из bspwm-dotfiles
+c "Color-scripts и иконки ranger"
+if [ -d "$BIN/color-scripts" ]; then
+    ok "color-scripts уже есть"
+else
+    if timeout 120 git clone -q --depth 1 \
+        https://github.com/Zproger/bspwm-dotfiles /tmp/zpd >>"$LOG" 2>&1; then
+        cp -r /tmp/zpd/bin/color-scripts "$BIN/" && chmod +x "$BIN"/color-scripts/* \
+            && ok "30 ASCII-анимаций в ~/bin/color-scripts" || no "color-scripts не скопировались"
+        rm -rf /tmp/zpd
+    else
+        no "репозиторий bspwm-dotfiles недоступен — color-scripts пропущены"
+    fi
+fi
+if [ -d "$HOME/.config/ranger/plugins/ranger_devicons" ]; then
+    ok "иконки ranger уже стоят"
+else
+    timeout 120 git clone -q --depth 1 https://github.com/alexanderjeurissen/ranger_devicons \
+        "$HOME/.config/ranger/plugins/ranger_devicons" >>"$LOG" 2>&1 \
+        && ok "иконки ranger" || no "ranger_devicons не склонировался"
+fi
+grep -q "default_linemode devicons" "$HOME/.config/ranger/rc.conf" 2>/dev/null || {
+    mkdir -p "$HOME/.config/ranger"
+    echo "default_linemode devicons" >> "$HOME/.config/ranger/rc.conf"
+}
+
 # ─────────────────────────────────────────────── conky
 c "Виджет Conky"
 mkdir -p "$HOME/.config/conky"
@@ -485,6 +512,12 @@ ranger_cd() {
     rm -f -- "$tmp"
 }
 alias r='ranger_cd'
+
+# fzf: Ctrl-R история, Ctrl-T файлы, Alt-C переход (noble 0.44 — source, не --bash)
+[ -f /usr/share/doc/fzf/examples/key-bindings.bash ] && source /usr/share/doc/fzf/examples/key-bindings.bash
+[ -f /usr/share/bash-completion/completions/fzf ] && source /usr/share/bash-completion/completions/fzf
+# zoxide: умный cd — команда z (после недели знает твои каталоги)
+command -v zoxide >/dev/null && eval "$(zoxide init bash)"
 EOF
         printf "alias walls='find \"%s\" -maxdepth 1 -type f | wc -l'\n" "$WALL_DIR"
     } >> "$HOME/.bashrc"
