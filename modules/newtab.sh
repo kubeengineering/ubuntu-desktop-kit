@@ -128,8 +128,14 @@ CURNAME=$(basename "$CUR")
 
 BG="#1a1b26"
 if [ -f "$HOME/.cache/wal/colors.sh" ]; then
+    # pywal дописывает в colors.sh строки вида $FZF_DEFAULT_OPTS — при set -u
+    # они валят скрипт, поэтому на время подключения проверку снимаем
+    set +u
     . "$HOME/.cache/wal/colors.sh"
-    BG="$background"
+    if [ -n "${background:-}" ]; then
+        BG="$background"
+    fi
+    set -u
 fi
 
 IMGS=$(find "$WALLDIR" -maxdepth 1 -type f -iname '*.jpg' 2>/dev/null \
