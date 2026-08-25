@@ -135,8 +135,40 @@ fi
 IMGS=$(find "$WALLDIR" -maxdepth 1 -type f -iname '*.jpg' 2>/dev/null \
        | grep -vF "$CURNAME" | sort | sed 's|.*|    "file://&",|')
 
-TILES=$(python3 - "$LINKS" <<'PY'
-import sys, html
+# значки берём из локальной базы Chrome: внутренние адреса сервис Google
+# не видит, а Chrome их уже скачал сам
+FAVDB=/tmp/newtab-favicons
+rm -f "$FAVDB"
+if [ -f "$HOME/.config/google-chrome/Default/Favicons" ]; then
+    cp "$HOME/.config/google-chrome/Default/Favicons" "$FAVDB" 2>/dev/null
+fi
+
+TILES=$(python3 - "$LINKS" "$FAVDB" <<'PY'
+import sys, html, os, base64, sqlite3
+
+cur = None
+if len(sys.argv) > 2 and os.path.exists(sys.argv[2]):
+    try:
+        cur = sqlite3.connect(sys.argv[2]).cursor()
+    except Exception:
+        cur = None
+
+def local_icon(host):
+    """Самый крупный значок этого хоста из кэша Chrome, как data:URI."""
+    if cur is None:
+        return ''
+    try:
+        row = cur.execute(
+            'SELECT b.image_data FROM icon_mapping m '
+            'JOIN favicon_bitmaps b ON b.icon_id = m.icon_id '
+            'WHERE m.page_url LIKE ? AND length(b.image_data) > 0 '
+            'ORDER BY b.width DESC LIMIT 1', ('%' + host + '%',)).fetchone()
+    except Exception:
+        return ''
+    if not row or not row[0]:
+        return ''
+    return 'data:image/png;base64,' + base64.b64encode(row[0]).decode()
+
 rows = []
 for line in open(sys.argv[1], encoding='utf-8'):
     line = line.strip()
@@ -146,13 +178,22 @@ for line in open(sys.argv[1], encoding='utf-8'):
     name = html.escape(name.strip()[:22]); url = html.escape(url.strip())
     letter = html.escape(name[:1].upper()) if name else '?'
     host = url.split('/')[2] if '://' in url else url
+
+    # порядок попыток: кэш Chrome -> сам сайт -> сервис Google -> буква
+    chain = [local_icon(host),
+             f'https://{host}/favicon.ico',
+             f'https://www.google.com/s2/favicons?sz=64&domain={host}']
+    chain = [c for c in chain if c]
+    src, alts = chain[0], '|'.join(chain[1:])
+
     rows.append(f'<a class="tile" href="{url}"><span class="ico">'
-                f'<img src="https://www.google.com/s2/favicons?sz=64&domain={host}" '
-                f'onerror="this.replaceWith(document.createTextNode(\'{letter}\'))"></span>'
+                f'<img src="{src}" data-alt="{html.escape(alts)}" data-letter="{letter}" '
+                f'onerror="nextIcon(this)"></span>'
                 f'<span class="cap">{name}</span></a>')
 print('\n'.join(rows))
 PY
 )
+rm -f "$FAVDB"
 
 cat > "$DIR/index.html" <<EOF
 <!doctype html>
@@ -187,6 +228,16 @@ $TILES
   <div class="hint">← → смена фона</div>
   <div class="toast" id="t"></div>
 <script>
+// значок не загрузился — пробуем следующий источник, в конце ставим букву
+function nextIcon(img){
+  var list=(img.dataset.alt||'').split('|').filter(Boolean);
+  if(list.length){
+    img.src=list.shift();
+    img.dataset.alt=list.join('|');
+  }else{
+    img.replaceWith(document.createTextNode(img.dataset.letter||'?'));
+  }
+}
 const imgs=[
 $IMGS
 ];
@@ -221,5 +272,6 @@ EOF
 
 echo "==> страница: $DIR/index.html"
 echo "    ярлыков:  $(grep -c 'class="tile"' "$DIR/index.html")"
+echo "    значков из кэша Chrome: $(grep -o 'src="data:image' "$DIR/index.html" | wc -l)"
 echo "    картинок: $(echo "$IMGS" | grep -c 'file://')"
 echo "    свои ссылки правь в: $LINKS"
