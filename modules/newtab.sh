@@ -123,7 +123,7 @@ PY
 fi
 
 # текущие обои исключаем — на новой вкладке всегда другая картинка
-CUR=$(gsettings get org.gnome.desktop.background picture-uri-dark 2>/dev/null | tr -d "'" | sed 's|^file://||')
+CUR=$(gsettings get org.gnome.desktop.background picture-uri-dark 2>/dev/null | tr -d "'" | sed 's#^file://##')
 CURNAME=$(basename "$CUR")
 
 BG="#1a1b26"
@@ -230,20 +230,26 @@ $TILES
 <script>
 // значок не загрузился — пробуем следующий источник, в конце ставим букву
 function nextIcon(img){
-  var list=(img.dataset.alt||'').split('|').filter(Boolean);
+  var rest=img.dataset.alt;
+  if(!rest){rest='';}
+  var list=rest.split('|').filter(Boolean);
   if(list.length){
     img.src=list.shift();
     img.dataset.alt=list.join('|');
-  }else{
-    img.replaceWith(document.createTextNode(img.dataset.letter||'?'));
+    return;
   }
+  var letter=img.dataset.letter;
+  if(!letter){letter='?';}
+  img.replaceWith(document.createTextNode(letter));
 }
 const imgs=[
 $IMGS
 ];
 const KEY='ntbg';
 let idx=parseInt(localStorage.getItem(KEY),10);
-if(isNaN(idx)||idx<0||idx>=imgs.length){idx=Math.floor(Math.random()*imgs.length);}
+if(isNaN(idx)){idx=-1;}
+if(idx<0){idx=Math.floor(Math.random()*imgs.length);}
+if(idx>=imgs.length){idx=Math.floor(Math.random()*imgs.length);}
 function show(i,say){
   if(!imgs.length)return;
   idx=(i%imgs.length+imgs.length)%imgs.length;
