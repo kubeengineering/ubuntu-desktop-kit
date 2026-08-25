@@ -153,15 +153,23 @@ fi
 IMGS=$(printf '%s\n' "$LIST" | sed 's|.*|    "file://&",|')
 
 # значки берём из локальной базы Chrome: внутренние адреса сервис Google
-# не видит, а Chrome их уже скачал сам
+# не видит, а Chrome их уже скачал сам.
+# Копируем вместе с журналом: Chrome держит базу в WAL, и без -wal/-shm
+# свежие значки в копию не попадают, а иногда не попадают вообще никакие
+FAVSRC="$HOME/.config/google-chrome/Default/Favicons"
 FAVDB=/tmp/newtab-favicons
-rm -f "$FAVDB"
-if [ -f "$HOME/.config/google-chrome/Default/Favicons" ]; then
-    cp "$HOME/.config/google-chrome/Default/Favicons" "$FAVDB" 2>/dev/null
+rm -f "$FAVDB" "$FAVDB-wal" "$FAVDB-shm" "$FAVDB-journal"
+if [ -f "$FAVSRC" ]; then
+    cp "$FAVSRC" "$FAVDB" 2>/dev/null
+    for ext in "-wal" "-shm" "-journal"; do
+        if [ -f "$FAVSRC$ext" ]; then
+            cp "$FAVSRC$ext" "$FAVDB$ext" 2>/dev/null
+        fi
+    done
 fi
 
 TILES=$(python3 - "$LINKS" "$FAVDB" <<'PY'
-import sys, html, os, base64, sqlite3
+import sys, html, os, base64, sqlite3, json
 
 cur = None
 if len(sys.argv) > 2 and os.path.exists(sys.argv[2]):
@@ -170,7 +178,20 @@ if len(sys.argv) > 2 and os.path.exists(sys.argv[2]):
     except Exception:
         cur = None
 
-def local_icon(host):
+# свой кэш значков: раз найденный значок остаётся навсегда, даже если в
+# следующий раз база Chrome ничего не отдаст. Иначе добавление одной
+# строки в links.txt роняло на букву сразу все плитки
+CACHE = os.path.join(os.path.dirname(sys.argv[1]), 'icons.json')
+cache = {}
+if os.path.exists(CACHE):
+    try:
+        cache = json.load(open(CACHE, encoding='utf-8'))
+    except Exception:
+        cache = {}
+
+stat = {'db': 0, 'cache': 0, 'none': 0}
+
+def from_chrome(host):
     """Самый крупный значок этого хоста из кэша Chrome, как data:URI."""
     if cur is None:
         return ''
@@ -185,6 +206,19 @@ def local_icon(host):
     if not row or not row[0]:
         return ''
     return 'data:image/png;base64,' + base64.b64encode(row[0]).decode()
+
+def local_icon(host):
+    got = from_chrome(host)
+    if got:
+        cache[host] = got
+        stat['db'] += 1
+        return got
+    got = cache.get(host, '')
+    if got:
+        stat['cache'] += 1
+        return got
+    stat['none'] += 1
+    return ''
 
 rows = []
 for line in open(sys.argv[1], encoding='utf-8'):
@@ -214,10 +248,18 @@ for line in open(sys.argv[1], encoding='utf-8'):
 
     rows.append(f'<a class="tile" href="{url}"><span class="ico">{ico}</span>'
                 f'<span class="cap">{name}</span></a>')
+
+try:
+    json.dump(cache, open(CACHE, 'w', encoding='utf-8'))
+except Exception:
+    pass
+
+sys.stderr.write('    значки: из Chrome %d, из своего кэша %d, без значка %d\n'
+                 % (stat['db'], stat['cache'], stat['none']))
 print('\n'.join(rows))
 PY
 )
-rm -f "$FAVDB"
+rm -f "$FAVDB" "$FAVDB-wal" "$FAVDB-shm" "$FAVDB-journal"
 
 cat > "$DIR/index.html" <<EOF
 <!doctype html>
@@ -302,6 +344,7 @@ EOF
 
 echo "==> страница: $DIR/index.html"
 echo "    ярлыков:  $(grep -c 'class="tile"' "$DIR/index.html")"
-echo "    значков из кэша Chrome: $(grep -o 'src="data:image' "$DIR/index.html" | wc -l)"
+echo "    со значками: $(grep -o 'src="data:image' "$DIR/index.html" | wc -l)"
 echo "    картинок: $(echo "$IMGS" | grep -c 'file://')"
 echo "    свои ссылки правь в: $LINKS"
+echo "    кэш значков:          $DIR/icons.json"
