@@ -124,7 +124,13 @@ fi
 
 # текущие обои исключаем — на новой вкладке всегда другая картинка
 CUR=$(gsettings get org.gnome.desktop.background picture-uri-dark 2>/dev/null | tr -d "'" | sed 's#^file://##')
-CURNAME=$(basename "$CUR")
+if [ -z "$CUR" ]; then
+    CUR=$(gsettings get org.gnome.desktop.background picture-uri 2>/dev/null | tr -d "'" | sed 's#^file://##')
+fi
+CURNAME=""
+if [ -n "$CUR" ]; then
+    CURNAME=$(basename "$CUR")
+fi
 
 BG="#1a1b26"
 if [ -f "$HOME/.cache/wal/colors.sh" ]; then
@@ -138,8 +144,13 @@ if [ -f "$HOME/.cache/wal/colors.sh" ]; then
     set -u
 fi
 
-IMGS=$(find "$WALLDIR" -maxdepth 1 -type f -iname '*.jpg' 2>/dev/null \
-       | grep -vF "$CURNAME" | sort | sed 's|.*|    "file://&",|')
+# фильтр применяем только когда имя известно: grep -vF "" выкинул бы ВСЁ,
+# потому что пустая подстрока есть в любой строке — и список стал бы пустым
+LIST=$(find "$WALLDIR" -maxdepth 1 -type f -iname '*.jpg' 2>/dev/null | sort)
+if [ -n "$CURNAME" ]; then
+    LIST=$(printf '%s\n' "$LIST" | grep -vF "$CURNAME")
+fi
+IMGS=$(printf '%s\n' "$LIST" | sed 's|.*|    "file://&",|')
 
 # значки берём из локальной базы Chrome: внутренние адреса сервис Google
 # не видит, а Chrome их уже скачал сам
@@ -186,15 +197,22 @@ for line in open(sys.argv[1], encoding='utf-8'):
     host = url.split('/')[2] if '://' in url else url
 
     # порядок попыток: кэш Chrome -> сам сайт -> сервис Google -> буква
-    chain = [local_icon(host),
-             f'https://{host}/favicon.ico',
-             f'https://www.google.com/s2/favicons?sz=64&domain={host}']
+    # у file:/// хоста нет, поиск по '%%' вернул бы первый попавшийся значок
+    chain = []
+    if host:
+        chain = [local_icon(host),
+                 f'https://{host}/favicon.ico',
+                 f'https://www.google.com/s2/favicons?sz=64&domain={host}']
     chain = [c for c in chain if c]
-    src, alts = chain[0], '|'.join(chain[1:])
 
-    rows.append(f'<a class="tile" href="{url}"><span class="ico">'
-                f'<img src="{src}" data-alt="{html.escape(alts)}" data-letter="{letter}" '
-                f'onerror="nextIcon(this)"></span>'
+    if chain:
+        src, alts = chain[0], '|'.join(chain[1:])
+        ico = (f'<img src="{src}" data-alt="{html.escape(alts)}" '
+               f'data-letter="{letter}" onerror="nextIcon(this)">')
+    else:
+        ico = letter
+
+    rows.append(f'<a class="tile" href="{url}"><span class="ico">{ico}</span>'
                 f'<span class="cap">{name}</span></a>')
 print('\n'.join(rows))
 PY
