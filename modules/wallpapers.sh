@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
 # Пополнение банка обоев с wallhaven — рисованные, под разрешение монитора.
 #
-#   ./modules/wallpapers.sh          # добавить 8 новых
-#   ./modules/wallpapers.sh 15       # добавить 15
-#   ./modules/wallpapers.sh --init   # первичная заливка (~200 штук)
+#   ./modules/wallpapers.sh                # добавить 8 новых
+#   ./modules/wallpapers.sh 15             # добавить 15
+#   ./modules/wallpapers.sh --init         # первичная заливка (~250 штук)
+#   ./modules/wallpapers.sh --install-timer  # раз в неделю по 10, автоматом
 #
 # Уже скачанные не перекачиваются: сверка идёт по имени файла.
 # Битые загрузки и HTML-страницы ошибок отсеиваются по mime-типу.
@@ -12,18 +13,59 @@ set -uo pipefail
 
 WALL_DIR="$HOME/Pictures/wallpapers-uw"
 if [ ! -d "$WALL_DIR" ]; then
-    WALL_DIR="$HOME/Изображения/wallpapers-uw"
-fi
-if [ ! -d "$WALL_DIR" ]; then
-    WALL_DIR="$HOME/Pictures/wallpapers-uw"
+    ALT="$HOME/Изображения/wallpapers-uw"
+    if [ -d "$ALT" ]; then
+        WALL_DIR="$ALT"
+    fi
 fi
 mkdir -p "$WALL_DIR"
 
 WANT="${1:-8}"
 MODE="add"
+
 if [ "$WANT" = "--init" ]; then
     MODE="init"
     WANT=250
+fi
+
+# ---------- еженедельный таймер ----------
+if [ "$WANT" = "--install-timer" ]; then
+    SELF=$(readlink -f "$0")
+    UD="$HOME/.config/systemd/user"
+    mkdir -p "$UD"
+
+    cat > "$UD/wallpapers-refill.service" <<EOF
+[Unit]
+Description=Пополнение банка обоев
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$SELF 10
+EOF
+
+    cat > "$UD/wallpapers-refill.timer" <<'EOF'
+[Unit]
+Description=Раз в неделю добирать обои
+
+[Timer]
+OnCalendar=Sun 13:00
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl --user daemon-reload
+    systemctl --user enable --now wallpapers-refill.timer
+    echo "таймер включён, ближайший запуск:"
+    systemctl --user list-timers wallpapers-refill.timer --no-pager
+    echo
+    echo "проверить руками:  systemctl --user start wallpapers-refill.service"
+    echo "посмотреть лог:    journalctl --user -u wallpapers-refill -n 30"
+    echo "выключить:         systemctl --user disable --now wallpapers-refill.timer"
+    exit 0
 fi
 
 for t in curl jq file; do
@@ -44,15 +86,20 @@ if [ -z "$RES" ]; then
 fi
 
 HAVE=$(find "$WALL_DIR" -maxdepth 1 -type f | wc -l)
-echo "==> банк: $HAVE шт., целевое разрешение $RES, добавляю до $WANT"
+echo "==> банк: $HAVE шт., целевое разрешение $RES, добираю до $WANT"
 
-# темы. digital art / artwork держат планку «рисованных»
+# digital art / artwork / illustration держат планку «рисованных»
 if [ "$MODE" = "init" ]; then
-    QUERIES="digital+art artwork illustration nature minimal space mountains dark city abstract forest sunset ocean neon"
+    QUERIES="digital+art artwork illustration scenery fantasy space mountains city abstract forest sunset ocean"
+    SORT="sorting=views"
 else
-    # каждую неделю крутим набор, чтобы выдача не повторялась
+    # каждую неделю новый набор тем и новая случайная выдача:
+    # seed привязан к номеру недели, внутри недели повторный запуск даст то же,
+    # на следующей — совсем другое
     ALL="digital+art artwork illustration scenery landscape fantasy space mountains forest sunset ocean neon city abstract minimal aurora clouds"
     QUERIES=$(echo "$ALL" | tr ' ' '\n' | shuf | head -6 | tr '\n' ' ')
+    SEED=$(date +%GW%V | tr -d 'W-' | cut -c1-6)
+    SORT="sorting=random&seed=$SEED"
 fi
 echo "    темы: $QUERIES"
 
@@ -60,7 +107,7 @@ echo "    темы: $QUERIES"
 for q in $QUERIES; do
     for p in 1 2; do
         curl -sf --max-time 25 \
-          "https://wallhaven.cc/api/v1/search?q=$q&atleast=$RES&categories=100&purity=100&sorting=views&page=$p" \
+          "https://wallhaven.cc/api/v1/search?q=$q&atleast=$RES&categories=100&purity=100&$SORT&page=$p" \
           | jq -r '.data[].path' 2>/dev/null >> /tmp/wl_all.txt
         sleep 2   # лимит wallhaven — 45 запросов в минуту
     done
