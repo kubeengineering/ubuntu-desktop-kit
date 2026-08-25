@@ -88,20 +88,22 @@ profile-tree {
 
 ```css
 /* терминал во всю вкладку, полосы нет */
-terminal-tab > .content {
+tab-body .content {
   margin: 0 !important;
 }
 ```
 
 ```css
 /* отступ на месте, но плотный — в цвет плашки */
-terminal-tab > .content {
+tab-body .content {
   margin: 0 !important;
   border: 15px solid #16161e !important;
 }
 ```
 
 `!important` обязателен: Angular компилирует `:host > .content` в атрибутные селекторы, и специфичность у оригинала выше.
+
+⚠️ Целиться в `terminal-tab > .content` **недостаточно** — `terminal-tab` это только локальный терминал. SSH-вкладка это компонент `ssh-tab`, дальше идут `telnet-tab`, `serial-tab`, а шаблон `baseTerminalTab.component.pug` у них общий. Поэтому селектор берёт потомка `tab-body` на любой глубине: так покрываются все типы вкладок и сплиты внутри них.
 
 ## Чего сделать нельзя: плотный корпус при прозрачном терминале
 
