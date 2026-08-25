@@ -83,6 +83,16 @@ if ! $APT update --error-on=any >>"$LOG" 2>&1; then
 fi
 ok "индексы обновлены"
 
+# papirus-folders в репозиториях Ubuntu НЕТ ни в одном выпуске — только PPA
+# авторов. Он же тянет свежий papirus-icon-theme вместо сборки 2024 года.
+c "PPA Papirus (иконки и инструмент раскраски папок)"
+if sudo add-apt-repository -y ppa:papirus/papirus >>"$LOG" 2>&1; then
+    $APT update >>"$LOG" 2>&1
+    ok "подключён"
+else
+    wr "PPA не подключился — иконки будут из архива Ubuntu (см. $LOG)"
+fi
+
 PKGS=(
     gnome-tweaks gnome-shell-extension-manager gnome-shell-extensions
     papirus-icon-theme dconf-cli sassc
