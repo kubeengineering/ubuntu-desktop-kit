@@ -56,12 +56,15 @@ Type=oneshot
 ExecStart=$TARGET 10
 EOF
 
+    # среда, а не выходные: рабочий ноутбук включён с понедельника по
+    # пятницу, и запуск на выходных всё время откладывался бы Persistent
+    # до утра понедельника
     cat > "$UD/wallpapers-refill.timer" <<'EOF'
 [Unit]
 Description=Раз в неделю добирать обои
 
 [Timer]
-OnCalendar=Sun 13:00
+OnCalendar=Wed 13:00
 RandomizedDelaySec=2h
 Persistent=true
 
@@ -76,6 +79,8 @@ EOF
     echo
     echo "проверить руками:  systemctl --user start wallpapers-refill.service"
     echo "посмотреть лог:    journalctl --user -u wallpapers-refill -n 30"
+    echo "сменить день:      nano $UD/wallpapers-refill.timer  (строка OnCalendar)"
+    echo "                   потом systemctl --user daemon-reload"
     echo "выключить:         systemctl --user disable --now wallpapers-refill.timer"
     exit 0
 fi
