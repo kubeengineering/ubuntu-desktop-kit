@@ -144,9 +144,12 @@ if [ -f "$HOME/.cache/wal/colors.sh" ]; then
     set -u
 fi
 
+# берём все ходовые форматы: в банке помимо jpg заводятся png и webp,
+# и раньше они просто не попадали на страницу
 # фильтр применяем только когда имя известно: grep -vF "" выкинул бы ВСЁ,
 # потому что пустая подстрока есть в любой строке — и список стал бы пустым
-LIST=$(find "$WALLDIR" -maxdepth 1 -type f -iname '*.jpg' 2>/dev/null | sort)
+LIST=$(find "$WALLDIR" -maxdepth 1 -type f \
+       -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | sort)
 if [ -n "$CURNAME" ]; then
     LIST=$(printf '%s\n' "$LIST" | grep -vF "$CURNAME")
 fi
