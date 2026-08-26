@@ -31,17 +31,29 @@ fi
 # ---------- еженедельный таймер ----------
 if [ "$WANT" = "--install-timer" ]; then
     SELF=$(readlink -f "$0")
+
+    # кладём себя в постоянное место: иначе таймер будет ссылаться на
+    # ~/Downloads или ~/Desktop, и первая же уборка сломает автопополнение
+    mkdir -p "$HOME/bin"
+    TARGET="$HOME/bin/wallpapers"
+    if [ "$SELF" != "$TARGET" ]; then
+        cp "$SELF" "$TARGET"
+        chmod +x "$TARGET"
+        echo "скрипт установлен: $TARGET"
+    fi
+
     UD="$HOME/.config/systemd/user"
     mkdir -p "$UD"
 
     cat > "$UD/wallpapers-refill.service" <<EOF
 [Unit]
 Description=Пополнение банка обоев
+Wants=network-online.target
 After=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=$SELF 10
+ExecStart=$TARGET 10
 EOF
 
     cat > "$UD/wallpapers-refill.timer" <<'EOF'
