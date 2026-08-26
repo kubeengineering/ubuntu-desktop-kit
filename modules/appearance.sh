@@ -5,8 +5,8 @@
 #
 #   ./appearance.sh                     весь пресет целиком
 #   ./appearance.sh --dark              то же, но тёмный вариант Graphite
-#   ./appearance.sh --folders black     другой цвет папок (grey, black, standard…)
-#   ./appearance.sh --buttons 36 20     другой размер кнопок
+#   ./appearance.sh --folders grey      другой цвет папок (black, grey, standard…)
+#   ./appearance.sh --buttons 46 32 20  ширина, высота, значок
 #   ./appearance.sh --skip-theme        не трогать тему GTK, только иконки и кнопки
 #   ./appearance.sh --check             ничего не менять, только проверить
 #   ./appearance.sh --revert            вернуть ровно то, что было до первого запуска
@@ -18,18 +18,20 @@
 set -uo pipefail
 
 VARIANT="light"
-FOLDERS="grey"
-BTN_SIZE=34
+FOLDERS="black"      # чёрные папки на светлом фоне: серые сливаются и не читаются
+BTN_W=40             # ширина кнопки, как в Windows — прямоугольник, не круг
+BTN_H=32
 BTN_ICO=20
 MODE="apply"
 SKIP_THEME=0
+BUILD_LOG="$HOME/.cache/appearance-build.log"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --dark)       VARIANT="dark"; shift ;;
         --light)      VARIANT="light"; shift ;;
-        --folders)    FOLDERS="${2:-grey}"; shift 2 ;;
-        --buttons)    BTN_SIZE="${2:-34}"; BTN_ICO="${3:-20}"; shift 3 ;;
+        --folders)    FOLDERS="${2:-black}"; shift 2 ;;
+        --buttons)    BTN_W="${2:-40}"; BTN_H="${3:-32}"; BTN_ICO="${4:-20}"; shift 4 ;;
         --skip-theme) SKIP_THEME=1; shift ;;
         --check)      MODE="check"; shift ;;
         --revert)     MODE="revert"; shift ;;
@@ -117,45 +119,64 @@ if [ "$MODE" = "apply" ]; then
     # --- 1. тема GTK: Graphite нужного варианта ------------------------
     if [ "$SKIP_THEME" -eq 0 ]; then
         echo "==> тема Graphite ($VARIANT)"
+        # sassc и git нужны для сборки, murrine и themes-extra — движки,
+        # без которых тема собирается, но выглядит поломанной
         MISS=""
         for p in sassc git; do
             if ! command -v "$p" >/dev/null 2>&1; then
                 MISS="$MISS $p"
             fi
         done
+
+        # ожидаемое имя каталога: COLOR_VARIANTS в install.sh это -Light / -Dark
+        case "$VARIANT" in
+            light) WANT_THEME="Graphite-Light" ;;
+            dark)  WANT_THEME="Graphite-Dark" ;;
+        esac
+
         if [ -n "$MISS" ]; then
-            bad "не хватает:$MISS — sudo apt install -y$MISS gnome-themes-extra gtk2-engines-murrine"
+            bad "не хватает:$MISS"
+            echo "     sudo apt install -y$MISS gnome-themes-extra gtk2-engines-murrine"
+            bad "тему и цветовую схему не трогаю"
         else
+            # без этого каталога перенаправление в лог обрывает всю команду,
+            # и сборка молча не запускается
+            mkdir -p "$(dirname "$BUILD_LOG")"
             SRCDIR="$HOME/.cache/graphite-src"
             if [ ! -d "$SRCDIR/.git" ]; then
                 rm -rf "$SRCDIR"
-                git clone -q --depth 1 \
-                    https://github.com/vinceliuice/Graphite-gtk-theme.git "$SRCDIR" 2>/dev/null
+                git clone --depth 1 \
+                    https://github.com/vinceliuice/Graphite-gtk-theme.git "$SRCDIR" \
+                    > "$BUILD_LOG" 2>&1
             fi
             if [ -x "$SRCDIR/install.sh" ]; then
                 # -l кладёт ссылку в ~/.config/gtk-4.0, иначе новые
                 # приложения останутся стандартными
-                ( cd "$SRCDIR"; ./install.sh -l -c "$VARIANT" -t grey >/dev/null 2>&1 )
-                NAME=$(ls -d "$HOME/.themes/Graphite"* 2>/dev/null \
-                       | grep -iE "Graphite(-grey)?-$VARIANT\$" | head -1)
-                if [ -z "$NAME" ]; then
-                    NAME=$(ls -d "$HOME/.themes/Graphite"* 2>/dev/null | head -1)
-                fi
-                if [ -n "$NAME" ]; then
-                    T=$(basename "$NAME")
-                    gset gtk-theme "$T"
-                    shell_theme_set "$T"
-                    if [ "$VARIANT" = "light" ]; then
-                        gset color-scheme "prefer-light"
-                    else
-                        gset color-scheme "prefer-dark"
-                    fi
-                    ok "тема: $T, схема: $VARIANT"
-                else
-                    bad "тема собралась, но каталог не найден в ~/.themes"
-                fi
+                ( cd "$SRCDIR"; ./install.sh -l -c "$VARIANT" ) >> "$BUILD_LOG" 2>&1
             else
-                bad "Graphite не скачалась (сеть?) — тему не менял"
+                echo "install.sh не найден в $SRCDIR" >> "$BUILD_LOG"
+            fi
+
+            # Тему и схему меняем ТОЛЬКО вместе и только если нужный
+            # каталог реально появился. Раньше здесь был запасной вариант
+            # «взять любую Graphite» — он подсовывал тёмную тему при светлой
+            # схеме, отчего половина окон оставалась тёмной, а половина
+            # уезжала в светлую, и всё становилось нечитаемым.
+            if [ -d "$HOME/.themes/$WANT_THEME" ]; then
+                gset gtk-theme "$WANT_THEME"
+                shell_theme_set "$WANT_THEME"
+                if [ "$VARIANT" = "light" ]; then
+                    gset color-scheme "prefer-light"
+                else
+                    gset color-scheme "prefer-dark"
+                fi
+                ok "тема: $WANT_THEME, схема: $VARIANT"
+            else
+                bad "$WANT_THEME не собралась — ни тему, ни схему не менял"
+                echo "     что есть в ~/.themes:"
+                ls "$HOME/.themes" 2>/dev/null | grep -i graphite | sed 's/^/       /'
+                echo "     последние строки сборки ($BUILD_LOG):"
+                tail -6 "$BUILD_LOG" 2>/dev/null | sed 's/^/       /'
             fi
         fi
     else
@@ -258,30 +279,54 @@ EOF
                 strip_block "$F"
                 cat >> "$F" <<EOF
 /* titlebuttons-begin */
+/* Кнопки заголовка в стиле Windows: прямоугольник без скруглений,
+   при наведении серый квадрат, у закрытия — красный с белым значком.
+   border-radius: 0 здесь принципиален: тема рисует круглую подложку. */
 headerbar button.titlebutton,
 .titlebar button.titlebutton,
 windowcontrols button {
-  min-width: ${BTN_SIZE}px;
-  min-height: ${BTN_SIZE}px;
+  min-width: ${BTN_W}px;
+  min-height: ${BTN_H}px;
   padding: 0;
-  margin: 0 2px;
+  margin: 0;
   background: none;
+  background-image: none;
   box-shadow: none;
   border: none;
-  border-radius: 8px;
+  border-radius: 0;
+  outline: none;
 }
 
 headerbar button.titlebutton:hover,
 .titlebar button.titlebutton:hover,
 windowcontrols button:hover {
-  background: alpha(currentColor, 0.12);
+  background-color: alpha(currentColor, 0.14);
+  background-image: none;
+  border-radius: 0;
+}
+
+headerbar button.titlebutton:active,
+.titlebar button.titlebutton:active,
+windowcontrols button:active {
+  background-color: alpha(currentColor, 0.22);
+  border-radius: 0;
 }
 
 headerbar button.titlebutton.close:hover,
 .titlebar button.titlebutton.close:hover,
 windowcontrols button.close:hover {
-  background: #e05561;
+  background-color: #e81123;
+  background-image: none;
   color: #ffffff;
+  border-radius: 0;
+}
+
+headerbar button.titlebutton.close:active,
+.titlebar button.titlebutton.close:active,
+windowcontrols button.close:active {
+  background-color: #c50f1f;
+  color: #ffffff;
+  border-radius: 0;
 }
 
 headerbar button.titlebutton image,
@@ -294,7 +339,7 @@ EOF
             done
             gset icon-theme "$THEME"
             ok "значки Fluent поверх $BASE"
-            ok "кнопка ${BTN_SIZE}px, значок ${BTN_ICO}px"
+            ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px, подсветка квадратная"
         fi
     fi
 fi
@@ -382,7 +427,7 @@ fi
     echo "- тема оболочки: \`$SHELL_T\`"
     echo "- схема: \`$SCHEME\`"
     echo "- тема иконок: \`$ACTIVE\`"
-    echo "- кнопка: ${BTN_SIZE}px, значок: ${BTN_ICO}px"
+    echo "- кнопка: ${BTN_W}x${BTN_H}px, значок: ${BTN_ICO}px"
     echo
     echo "## Откуда GTK берёт значки"
     echo
