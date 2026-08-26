@@ -1,0 +1,4 @@
+# Скрипты всегда с unix-переводами строк: с CRLF ядро не находит
+# интерпретатор и падает с /usr/bin/env: bash: No such file or directory
+*.sh text eol=lf
+*.py text eol=lf
