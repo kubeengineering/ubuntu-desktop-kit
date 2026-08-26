@@ -1,325 +1,256 @@
 #!/usr/bin/env bash
-# Внешний вид окон одним скриптом: кнопки заголовка как в Windows,
-# острые углы у окон, скруглённый виджет conky.
+# Кнопки заголовка и углы окон — правкой КОПИИ темы, а не пользовательского css.
 #
-#   ./look.sh                   всё сразу
-#   ./look.sh --buttons         только кнопки заголовка
-#   ./look.sh --corners         только углы окон
-#   ./look.sh --widget 20       только виджет, радиус 20px
-#   ./look.sh --size 52 38 28   размер кнопок: ширина, высота, значок
+#   ./look.sh                     кнопки + острые углы
+#   ./look.sh --no-corners        только кнопки, углы оставить как есть
+#   ./look.sh --size 46 34 24     ширина, высота кнопки, размер значка
 #   ./look.sh --font "JetBrainsMono Nerd Font 11"   шрифт интерфейса
-#   ./look.sh --check           ничего не менять, показать состояние
-#   ./look.sh --diag            почему css мог не примениться
-#   ./look.sh --revert          вернуть всё как было
+#   ./look.sh --check             что сейчас применено
+#   ./look.sh --revert            вернуть исходную тему
 #
-# Тема GTK, цветовая схема, папки, обои и панель НЕ трогаются.
+# ПОЧЕМУ ТАК, а не через ~/.config/gtk-3.0/gtk.css:
 #
-# Что и почему делается:
+#   Прошлые попытки писали правила в пользовательский css и не действовали.
+#   Разбор показал сразу три причины:
+#     * ~/.config/gtk-4.0/gtk.css у тем, поставленных с флагом -l, это СИМЛИНК
+#       внутрь темы — правки уезжали в саму тему;
+#     * свойство -gtk-icon-size существует ТОЛЬКО в GTK4, в GTK3 его нет,
+#       поэтому значок там не увеличивался ни при каких значениях;
+#     * ошибки разбора в самой теме (No property named "--accent-color")
+#       сыпались до нашего блока.
 #
-#   Кнопки. Форму значка даёт тема иконок, размер и подложку — тема GTK.
-#   Поэтому создаётся тема ИМЯ-Fluent-Titlebar: наследует текущую целиком,
-#   переопределяет ровно четыре значка из Fluent. Размер и квадратная
-#   подсветка пишутся в gtk.css, каждое свойство с !important — правило
-#   темы button.titlebutton:not(.suggested-action):not(.destructive-action)
-#   специфичнее пользовательского, и без !important подложка остаётся
-#   круглой, сколько её ни переопределяй.
+#   Здесь тема копируется в ИМЯ-Square, правила дописываются в САМЫЙ КОНЕЦ
+#   её собственных файлов, и система переключается на копию. Оригинал не
+#   трогается вовсе, пользовательский css не трогается вовсе, спорить со
+#   специфичностью не с кем.
 #
-#   Углы. Скругление задаёт тема, снимается тем же способом.
-#
-#   Виджет. У conky радиуса нет вовсе, поэтому подложку рисует Lua через
-#   Cairo, а собственное окно conky делается прозрачным. Цвет и плотность
-#   берутся из текущего конфига, сам конфиг сохраняется рядом.
+# ЧТО НЕ ТРОГАЕТСЯ: оригинальная тема, цветовая схема, тема оболочки,
+# иконки папок, обои, панель, conky, ~/.config/gtk-*.
 #
 # Chrome, Tabby и Telegram не изменятся: это Electron, они рисуют себя сами.
 
 set -uo pipefail
 
-# части выключены; если ни одна не названа явно, включаются все три
-DO_BUTTONS=0
-DO_CORNERS=0
-DO_WIDGET=0
 BTN_W=46
 BTN_H=34
 BTN_ICO=24
-RADIUS=14
+DO_CORNERS=1
 FONT=""
 MODE="apply"
-PICKED=0
-STATE="$HOME/.local/state"
-BEFORE="$STATE/look-before.env"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --buttons) DO_BUTTONS=1; PICKED=1; shift ;;
-        --corners) DO_CORNERS=1; PICKED=1; shift ;;
-        --widget)  DO_WIDGET=1; PICKED=1; RADIUS="${2:-14}"; shift 2 ;;
-        --size)    BTN_W="${2:-46}"; BTN_H="${3:-34}"; BTN_ICO="${4:-24}"; shift 4 ;;
-        --font)    FONT="${2:-JetBrainsMono Nerd Font 11}"; PICKED=1; shift 2 ;;
-        --diag)    MODE="diag"; shift ;;
-        --check)   MODE="check"; shift ;;
-        --revert)  MODE="revert"; shift ;;
-        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        --no-corners) DO_CORNERS=0; shift ;;
+        --size)       BTN_W="${2:-46}"; BTN_H="${3:-34}"; BTN_ICO="${4:-24}"; shift 4 ;;
+        --font)       FONT="${2:-}"; shift 2 ;;
+        --check)      MODE="check"; shift ;;
+        --revert)     MODE="revert"; shift ;;
+        -h|--help)    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "неизвестный аргумент: $1"; echo "подсказка: $0 --help"; exit 1 ;;
     esac
 done
 
-if [ "$PICKED" -eq 0 ]; then
-    DO_BUTTONS=1
-    DO_CORNERS=1
-    DO_WIDGET=1
-fi
-
-CSS3="$HOME/.config/gtk-3.0/gtk.css"
-CSS4="$HOME/.config/gtk-4.0/gtk.css"
-CONKY_DIR="$HOME/.config/conky"
-CONKY_CONF="$CONKY_DIR/main.conf"
-CONKY_BAK="$CONKY_DIR/main.conf.bak-look"
-LUA="$CONKY_DIR/rounded.lua"
+STATE="$HOME/.local/state"
+BEFORE="$STATE/look-before.env"
+SUFFIX="-Square"
 FLUENT="https://raw.githubusercontent.com/vinceliuice/Fluent-icon-theme/master/src/symbolic/actions"
 
 ok()  { echo "  ✓ $*"; }
 bad() { echo "  ✗ $*"; }
 
-gget() { gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'"; }
-gset() { gsettings set org.gnome.desktop.interface icon-theme "$1" 2>/dev/null; }
-fget() { gsettings get org.gnome.desktop.interface font-name 2>/dev/null | tr -d "'"; }
-fset() { gsettings set org.gnome.desktop.interface font-name "$1" 2>/dev/null; }
+gi_get() { gsettings get org.gnome.desktop.interface "$1" 2>/dev/null | tr -d "'"; }
+gi_set() { gsettings set org.gnome.desktop.interface "$1" "$2" 2>/dev/null; }
 
-# GTK читает css при старте приложения: без перезапуска правки не видны
-restart_apps() {
-    if command -v nautilus >/dev/null 2>&1; then
-        nautilus -q >/dev/null 2>&1
-        ok "Nautilus закрыт — откроется уже с новым видом"
-    fi
-}
+CUR_GTK=$(gi_get gtk-theme)
+CUR_ICON=$(gi_get icon-theme)
 
-strip_block() {
-    if [ -f "$2" ]; then
-        sed -i "/$1-begin/,/$1-end/d" "$2"
-    fi
-}
+BASE_GTK="$CUR_GTK"
+case "$CUR_GTK" in *"$SUFFIX") BASE_GTK="${CUR_GTK%$SUFFIX}" ;; esac
+BASE_ICON="$CUR_ICON"
+case "$CUR_ICON" in *-Fluent-Titlebar) BASE_ICON="${CUR_ICON%-Fluent-Titlebar}" ;; esac
 
-# Тема, поставленная с флагом -l, вешает СИМЛИНК ~/.config/gtk-4.0/gtk.css
-# на свой файл. Дописывать туда нельзя: правки уедут в тему и пропадут при
-# её переустановке. Заменяем ссылку обычным файлом, который подключает
-# тему через @import — так и тема на месте, и наши правила отдельно.
-ensure_own_css() {
-    F="$1"
-    mkdir -p "$(dirname "$F")"
-    if [ -L "$F" ]; then
-        TARGET=$(readlink -f "$F")
-        rm -f "$F"
-        {
-            echo "/* сюда указывал симлинк темы, подключаем её как есть */"
-            echo "@import url(\"file://$TARGET\");"
-        } > "$F"
-        ok "симлинк заменён файлом с @import: $(basename "$(dirname "$F")")"
-        echo "     тема подключена из $TARGET"
-    fi
-    touch "$F"
-}
+NEW_GTK="$BASE_GTK$SUFFIX"
+NEW_ICON="$BASE_ICON-Fluent-Titlebar"
+THEME_DIR="$HOME/.themes/$NEW_GTK"
+ICON_DIR="$HOME/.local/share/icons/$NEW_ICON"
 
-CUR=$(gget)
-BASE="$CUR"
-case "$CUR" in *-Fluent-Titlebar) BASE="${CUR%-Fluent-Titlebar}" ;; esac
-if [ -z "$BASE" ]; then
-    BASE="Adwaita"
-fi
-THEME="$BASE-Fluent-Titlebar"
-DIR="$HOME/.local/share/icons/$THEME"
-
-restart_conky() {
-    if command -v conky >/dev/null 2>&1; then
-        pkill -x conky >/dev/null 2>&1
-        sleep 1
-        nohup conky -c "$CONKY_CONF" >/dev/null 2>&1 &
-        sleep 1
-        if pgrep -x conky >/dev/null 2>&1; then
-            ok "conky перезапущен"
-        else
-            bad "conky не поднялся — посмотри: conky -c $CONKY_CONF"
+# где лежит исходная тема
+find_theme() {
+    for d in "$HOME/.themes/$1" "$HOME/.local/share/themes/$1" "/usr/share/themes/$1"; do
+        if [ -d "$d" ]; then
+            echo "$d"
+            return
         fi
-    fi
+    done
 }
 
 # ---------------------------------------------------------------- откат
 
 if [ "$MODE" = "revert" ]; then
     echo "==> откат"
-    strip_block titlebuttons "$CSS3"
-    strip_block titlebuttons "$CSS4"
-    strip_block corners "$CSS3"
-    strip_block corners "$CSS4"
-    ok "правила из gtk.css убраны"
-
-    case "$CUR" in
-        *-Fluent-Titlebar)
-            rm -rf "$HOME/.local/share/icons/$CUR"
-            gset "$BASE"
-            ok "тема иконок возвращена: $BASE"
-            ;;
-        *) ok "тема иконок и так своя: $CUR" ;;
-    esac
-
-    if [ -f "$CONKY_BAK" ]; then
-        mv "$CONKY_BAK" "$CONKY_CONF"
-        rm -f "$LUA"
-        ok "конфиг conky восстановлен"
-        restart_conky
-    else
-        ok "conky не трогался"
-    fi
 
     if [ -f "$BEFORE" ]; then
         . "$BEFORE"
+        if [ -n "${GTK_WAS:-}" ]; then
+            gi_set gtk-theme "$GTK_WAS"
+            ok "тема окон: $GTK_WAS"
+        fi
+        if [ -n "${ICON_WAS:-}" ]; then
+            gi_set icon-theme "$ICON_WAS"
+            ok "тема иконок: $ICON_WAS"
+        fi
         if [ -n "${FONT_WAS:-}" ]; then
-            fset "$FONT_WAS"
-            ok "шрифт интерфейса возвращён: $FONT_WAS"
+            gi_set font-name "$FONT_WAS"
+            ok "шрифт: $FONT_WAS"
         fi
         rm -f "$BEFORE"
+    else
+        gi_set gtk-theme "$BASE_GTK"
+        gi_set icon-theme "$BASE_ICON"
+        ok "вернул: тема $BASE_GTK, иконки $BASE_ICON"
     fi
 
-    restart_apps
-    echo
-    echo "перелогинься, чтобы применилось везде"
-    exit 0
-fi
+    if [ -d "$THEME_DIR" ]; then
+        rm -rf "$THEME_DIR"
+        ok "копия темы удалена: $THEME_DIR"
+    fi
+    if [ -d "$ICON_DIR" ]; then
+        rm -rf "$ICON_DIR"
+        ok "тема значков удалена"
+    fi
 
-# ---------------------------------------------------------------- диагностика
-
-if [ "$MODE" = "diag" ]; then
-    echo "==> файлы"
-    for F in "$CSS3" "$CSS4"; do
-        if [ -L "$F" ]; then
-            echo "  $F — СИМЛИНК на $(readlink -f "$F")"
-            echo "     это файл темы: наши правила туда писать нельзя"
-        elif [ -f "$F" ]; then
-            echo "  $F — строк $(wc -l < "$F"), блоков: кнопки $(grep -c 'titlebuttons-begin' "$F"), углы $(grep -c 'corners-begin' "$F")"
-            if grep -q '@import' "$F"; then
-                echo "     тема подключена через @import — это нормально"
-            fi
-        else
-            echo "  $F — НЕТ"
-        fi
-    done
-
-    echo
-    echo "==> что GTK думает о нашем css"
-    echo "  (ошибки разбора означают, что правило целиком отброшено)"
     if command -v nautilus >/dev/null 2>&1; then
         nautilus -q >/dev/null 2>&1
-        sleep 1
-        timeout 12 env GTK_DEBUG=css nautilus --new-window >"$HOME/.cache/look-diag.log" 2>&1 &
-        sleep 6
-        nautilus -q >/dev/null 2>&1
-        grep -iE 'gtk.css|error|not a valid|unknown|expected' "$HOME/.cache/look-diag.log" 2>/dev/null \
-            | head -20 | sed 's/^/    /'
-        echo "  полный вывод: $HOME/.cache/look-diag.log"
-    else
-        echo "  nautilus не установлен, проверить нечем"
     fi
+    echo
+    echo "готово. Пользовательский ~/.config/gtk-* не трогался ни разу."
     exit 0
 fi
 
-# ---------------------------------------------------------------- проверка
+# ---------------------------------------------------------------- состояние
 
 if [ "$MODE" = "check" ]; then
     echo "==> состояние"
-    echo "  тема иконок:  $CUR"
-    if [ -d "$DIR" ]; then
-        ok "кнопки: тема $THEME, значков $(ls "$DIR/symbolic/actions" 2>/dev/null | wc -l) из 4"
+    echo "  тема окон:    $CUR_GTK"
+    echo "  тема иконок:  $CUR_ICON"
+    echo "  шрифт:        $(gi_get font-name)"
+    if [ -d "$THEME_DIR" ]; then
+        if grep -q 'squarebuttons-begin' "$THEME_DIR/gtk-3.0/gtk.css" 2>/dev/null; then
+            ok "копия темы на месте, правила внутри неё"
+            grep -m1 'min-width' "$THEME_DIR/gtk-3.0/gtk.css" | sed 's/^/     GTK3: /'
+        else
+            bad "копия темы есть, но правил в ней нет"
+        fi
+        if grep -q 'squarebuttons-begin' "$THEME_DIR/gtk-4.0/gtk.css" 2>/dev/null; then
+            grep -m1 'gtk-icon-size' "$THEME_DIR/gtk-4.0/gtk.css" | sed 's/^/     GTK4: /'
+        else
+            bad "в GTK4-части копии правил нет"
+        fi
     else
-        bad "кнопки не настроены"
+        bad "копии темы нет — правки не применялись"
     fi
-    if grep -q 'titlebuttons-begin' "$CSS3" 2>/dev/null; then
-        ok "размер кнопок прописан: $(grep -m1 'min-width' "$CSS3" | tr -d ' ;')"
+    if [ -d "$ICON_DIR" ]; then
+        ok "значков Fluent: $(ls "$ICON_DIR/symbolic/actions" 2>/dev/null | wc -l) из 4"
     else
-        bad "размер кнопок не прописан"
+        bad "значки не подменены"
     fi
-    if grep -q 'corners-begin' "$CSS3" 2>/dev/null; then
-        ok "углы окон сделаны острыми"
-    else
-        bad "углы окон от темы"
-    fi
-    if [ -f "$LUA" ]; then
-        ok "виджет скруглён: $(grep -m1 'local RADIUS' "$LUA" | tr -d ' ')"
-    else
-        bad "виджет не скруглён"
-    fi
-    echo "  шрифт интерфейса: $(fget)"
     exit 0
 fi
 
-# ---------------------------------------------------------------- кнопки
+# ---------------------------------------------------------------- применение
 
-if [ "$DO_BUTTONS" -eq 1 ]; then
-    echo "==> кнопки заголовка"
+for v in "$BTN_W" "$BTN_H" "$BTN_ICO"; do
+    if ! echo "$v" | grep -qE '^[0-9]+$'; then
+        bad "размеры — числа: $0 --size 46 34 24"
+        exit 1
+    fi
+done
 
-    for v in "$BTN_W" "$BTN_H" "$BTN_ICO"; do
-        if ! echo "$v" | grep -qE '^[0-9]+$'; then
-            bad "размеры — числа: $0 --size 46 34 22"
-            exit 1
-        fi
-    done
+mkdir -p "$STATE"
+if [ ! -f "$BEFORE" ]; then
+    # значения в кавычках: в именах шрифтов есть пробелы, и без них
+    # строка FONT_WAS=Ubuntu Sans 11 при чтении разваливается на команду
+    {
+        echo "GTK_WAS='$CUR_GTK'"
+        echo "ICON_WAS='$CUR_ICON'"
+        echo "FONT_WAS='$(gi_get font-name)'"
+    } > "$BEFORE"
+    ok "запомнил исходное: тема $CUR_GTK, иконки $CUR_ICON"
+fi
 
-    FOUND=""
-    for d in "$HOME/.local/share/icons/$BASE" "$HOME/.icons/$BASE" "/usr/share/icons/$BASE"; do
-        if [ -d "$d" ]; then
-            FOUND="$d"
-        fi
-    done
+# --- 1. копия темы ----------------------------------------------------
+echo "==> копия темы"
+SRC_THEME=$(find_theme "$BASE_GTK")
+if [ -z "$SRC_THEME" ]; then
+    bad "не нашёл тему $BASE_GTK ни в ~/.themes, ни в /usr/share/themes"
+    exit 1
+fi
+ok "исходная тема: $SRC_THEME"
 
-    if [ -z "$FOUND" ]; then
-        bad "темы иконок $BASE нет — кнопки пропускаю"
-    else
-        mkdir -p "$DIR/symbolic/actions"
-        GOT=0
-        for n in close maximize minimize restore; do
-            F="$DIR/symbolic/actions/window-$n-symbolic.svg"
-            CODE=$(curl -sf -L --max-time 30 -o "$F" -w '%{http_code}' \
-                   "$FLUENT/window-$n-symbolic.svg" 2>/dev/null)
-            if [ "$CODE" = "200" ]; then
-                if head -c 200 "$F" 2>/dev/null | grep -q '<svg'; then
-                    GOT=$((GOT + 1))
-                else
-                    rm -f "$F"
-                fi
-            else
-                rm -f "$F"
-            fi
-        done
+rm -rf "$THEME_DIR"
+mkdir -p "$HOME/.themes"
+cp -r "$SRC_THEME" "$THEME_DIR"
 
-        if [ "$GOT" -ne 4 ]; then
-            bad "значков скачалось $GOT из 4 — кнопки не менял"
-            rm -rf "$DIR"
-        else
-            cat > "$DIR/index.theme" <<EOF
-[Icon Theme]
-Name=$THEME
-Comment=$BASE с кнопками заголовка из Fluent
-Inherits=$BASE,Adwaita,hicolor
-Directories=symbolic/actions
+# копия должна называть себя по-новому, иначе GNOME путается
+if [ -f "$THEME_DIR/index.theme" ]; then
+    sed -i "s|^Name=.*|Name=$NEW_GTK|" "$THEME_DIR/index.theme"
+    sed -i "s|^GtkTheme=.*|GtkTheme=$NEW_GTK|" "$THEME_DIR/index.theme"
+    sed -i "s|^MetacityTheme=.*|MetacityTheme=$NEW_GTK|" "$THEME_DIR/index.theme"
+fi
+ok "копия: $THEME_DIR"
 
-[symbolic/actions]
-Size=16
-MinSize=8
-MaxSize=512
-Context=Actions
-Type=Scalable
-EOF
-            gtk-update-icon-cache -f "$DIR" >/dev/null 2>&1
+# --- 2. правила в конец файлов копии ----------------------------------
+echo "==> правила кнопок и углов"
 
-            # GTK3 и GTK4 понимают РАЗНЫЙ набор свойств и селекторов:
-            # -gtk-outline-radius и decoration есть только в GTK3, и на
-            # неизвестном свойстве GTK4 отбрасывает правило целиком.
-            # Поэтому блоки пишутся раздельно.
-            ensure_own_css "$CSS3"
-            ensure_own_css "$CSS4"
-            strip_block titlebuttons "$CSS3"
-            strip_block titlebuttons "$CSS4"
+# GTK3 не знает -gtk-icon-size: значок масштабируется трансформацией
+SCALE=$(awk "BEGIN{printf \"%.2f\", $BTN_ICO/16}")
 
-            cat >> "$CSS3" <<EOF
-/* titlebuttons-begin */
+CORNERS3=""
+CORNERS4=""
+if [ "$DO_CORNERS" -eq 1 ]; then
+    CORNERS3="
+decoration,
+decoration:backdrop,
+window.csd,
+window.background,
+.titlebar,
+headerbar,
+headerbar.titlebar,
+menu,
+.menu,
+.context-menu,
+popover.background,
+tooltip,
+tooltip.background {
+  border-radius: 0 !important;
+}
+"
+    CORNERS4="
+window,
+window.csd,
+window.background,
+.background,
+headerbar,
+.titlebar,
+popover > contents,
+popover > arrow,
+tooltip,
+.card,
+.toolbar {
+  border-radius: 0 !important;
+}
+"
+fi
+
+mkdir -p "$THEME_DIR/gtk-3.0" "$THEME_DIR/gtk-4.0"
+touch "$THEME_DIR/gtk-3.0/gtk.css" "$THEME_DIR/gtk-4.0/gtk.css"
+
+cat >> "$THEME_DIR/gtk-3.0/gtk.css" <<EOF
+
+/* squarebuttons-begin
+   Дописано в самый конец файла темы: спорить со специфичностью не с кем.
+   В GTK3 НЕТ свойства -gtk-icon-size, поэтому значок увеличивается
+   трансформацией -gtk-icon-transform. */
 headerbar button.titlebutton,
 .titlebar button.titlebutton,
 button.titlebutton {
@@ -337,6 +268,12 @@ button.titlebutton {
   -gtk-outline-radius: 0 !important;
 }
 
+headerbar button.titlebutton image,
+.titlebar button.titlebutton image,
+button.titlebutton image {
+  -gtk-icon-transform: scale(${SCALE}) !important;
+}
+
 headerbar button.titlebutton:hover,
 .titlebar button.titlebutton:hover,
 button.titlebutton:hover {
@@ -348,7 +285,7 @@ button.titlebutton:hover {
 headerbar button.titlebutton:active,
 .titlebar button.titlebutton:active,
 button.titlebutton:active {
-  background-color: alpha(currentColor, 0.22) !important;
+  background-color: alpha(currentColor, 0.24) !important;
   border-radius: 0 !important;
 }
 
@@ -368,21 +305,17 @@ button.titlebutton.close:active {
   color: #ffffff !important;
   border-radius: 0 !important;
 }
-
-headerbar button.titlebutton image,
-.titlebar button.titlebutton image,
-button.titlebutton image {
-  -gtk-icon-size: ${BTN_ICO}px !important;
-}
-/* titlebuttons-end */
+$CORNERS3
+/* squarebuttons-end */
 EOF
 
-            cat >> "$CSS4" <<EOF
-/* titlebuttons-begin */
-windowcontrols button,
+cat >> "$THEME_DIR/gtk-4.0/gtk.css" <<EOF
+
+/* squarebuttons-begin
+   В GTK4 узел называется windowcontrols, и здесь -gtk-icon-size работает. */
 windowcontrols > button,
-headerbar windowcontrols button,
-.titlebar windowcontrols button {
+windowcontrols button,
+headerbar windowcontrols > button {
   min-width: ${BTN_W}px !important;
   min-height: ${BTN_H}px !important;
   padding: 0 !important;
@@ -396,258 +329,153 @@ headerbar windowcontrols button,
   outline: none !important;
 }
 
-windowcontrols button:hover,
+windowcontrols > button > image,
+windowcontrols button image {
+  -gtk-icon-size: ${BTN_ICO}px !important;
+  min-width: ${BTN_ICO}px !important;
+  min-height: ${BTN_ICO}px !important;
+}
+
 windowcontrols > button:hover,
-headerbar windowcontrols button:hover {
+windowcontrols button:hover {
   background-color: alpha(currentColor, 0.14) !important;
   background-image: none !important;
   border-radius: 0 !important;
 }
 
-windowcontrols button:active,
 windowcontrols > button:active,
-headerbar windowcontrols button:active {
-  background-color: alpha(currentColor, 0.22) !important;
+windowcontrols button:active {
+  background-color: alpha(currentColor, 0.24) !important;
   border-radius: 0 !important;
 }
 
-windowcontrols button.close:hover,
 windowcontrols > button.close:hover,
-headerbar windowcontrols button.close:hover {
+windowcontrols button.close:hover {
   background-color: #e81123 !important;
   background-image: none !important;
   color: #ffffff !important;
   border-radius: 0 !important;
 }
 
-windowcontrols button.close:active,
 windowcontrols > button.close:active,
-headerbar windowcontrols button.close:active {
+windowcontrols button.close:active {
   background-color: #c50f1f !important;
   color: #ffffff !important;
   border-radius: 0 !important;
 }
-
-windowcontrols button image,
-windowcontrols > button image {
-  -gtk-icon-size: ${BTN_ICO}px !important;
-  min-width: ${BTN_ICO}px !important;
-  min-height: ${BTN_ICO}px !important;
-}
-/* titlebuttons-end */
+$CORNERS4
+/* squarebuttons-end */
 EOF
 
-            gset "$THEME"
-            ok "значки Fluent поверх $BASE"
-            ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px, подсветка квадратная"
-        fi
-    fi
-fi
-
-# ---------------------------------------------------------------- углы
-
+ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px (GTK3 через scale ${SCALE})"
 if [ "$DO_CORNERS" -eq 1 ]; then
-    echo "==> углы окон"
-    ensure_own_css "$CSS3"
-    ensure_own_css "$CSS4"
-    strip_block corners "$CSS3"
-    strip_block corners "$CSS4"
-
-    # GTK3: скругление живёт в decoration и в classic-виджетах меню
-    cat >> "$CSS3" <<'CSSEOF'
-/* corners-begin */
-decoration,
-decoration:backdrop,
-window.csd,
-window.csd:backdrop,
-window.background,
-window.dialog-csd,
-.background.csd,
-.titlebar,
-.titlebar:backdrop,
-headerbar,
-headerbar.titlebar,
-headerbar:backdrop,
-menu,
-.menu,
-.context-menu,
-popover.background,
-tooltip,
-tooltip.background,
-.osd {
-  border-radius: 0 !important;
-}
-/* corners-end */
-CSSEOF
-
-    # GTK4: decoration и menu не существуют, зато есть popover > contents
-    cat >> "$CSS4" <<'CSSEOF'
-/* corners-begin */
-window,
-window.csd,
-window.background,
-window.dialog,
-.background,
-headerbar,
-.titlebar,
-popover > contents,
-popover > arrow,
-tooltip,
-.card,
-.osd,
-.toolbar {
-  border-radius: 0 !important;
-}
-/* corners-end */
-CSSEOF
-    ok "скругление снято у окон, заголовков, меню и подсказок"
+    ok "углы окон, меню и подсказок сделаны острыми"
 fi
 
-# ---------------------------------------------------------------- виджет
-
-if [ "$DO_WIDGET" -eq 1 ]; then
-    echo "==> виджет conky (радиус ${RADIUS}px)"
-
-    if ! echo "$RADIUS" | grep -qE '^[0-9]+$'; then
-        bad "радиус — число: $0 --widget 14"
-        exit 1
+# --- 3. значки Fluent -------------------------------------------------
+echo "==> значки Fluent"
+SRC_ICON=""
+for d in "$HOME/.local/share/icons/$BASE_ICON" "$HOME/.icons/$BASE_ICON" \
+         "/usr/share/icons/$BASE_ICON"; do
+    if [ -d "$d" ]; then
+        SRC_ICON="$d"
     fi
+done
 
-    if [ ! -f "$CONKY_CONF" ]; then
-        bad "конфига нет: $CONKY_CONF — виджет пропускаю"
-    else
-        COLOUR=$(grep -oP "own_window_colour\s*=\s*'\K[0-9a-fA-F]{6}" "$CONKY_CONF" | head -1)
-        if [ -z "$COLOUR" ]; then
-            COLOUR="1e1e2e"
-        fi
-        ALPHA=$(grep -oP "own_window_argb_value\s*=\s*\K[0-9]+" "$CONKY_CONF" | head -1)
-        if [ -z "$ALPHA" ]; then
-            ALPHA=225
-        fi
-        if [ "$ALPHA" = "0" ]; then
-            ALPHA=225      # уже применяли: берём плотность по умолчанию
-        fi
-
-        # hex в доли единицы: awk есть везде, bc и python3 — не всегда
-        R_HEX="${COLOUR:0:2}"
-        G_HEX="${COLOUR:2:2}"
-        B_HEX="${COLOUR:4:2}"
-        RF=$(awk "BEGIN{printf \"%.3f\", $((16#$R_HEX))/255}")
-        GF=$(awk "BEGIN{printf \"%.3f\", $((16#$G_HEX))/255}")
-        BF=$(awk "BEGIN{printf \"%.3f\", $((16#$B_HEX))/255}")
-        AF=$(awk "BEGIN{printf \"%.3f\", $ALPHA/255}")
-
-        cat > "$LUA" <<EOF
--- Скруглённый фон для conky: своего border-radius у него нет, поэтому
--- подложка рисуется здесь, а окно conky делается прозрачным.
-require 'cairo'
-
-local RADIUS = $RADIUS
-local R, G, B, A = $RF, $GF, $BF, $AF
-
-function conky_draw_bg()
-    if conky_window == nil then
-        return
-    end
-
-    local w = conky_window.width
-    local h = conky_window.height
-    local r = RADIUS
-    if r * 2 > w then r = w / 2 end
-    if r * 2 > h then r = h / 2 end
-
-    local surface = cairo_xlib_surface_create(conky_window.display,
-        conky_window.drawable, conky_window.visual, w, h)
-    local cr = cairo_create(surface)
-
-    cairo_new_path(cr)
-    cairo_move_to(cr, r, 0)
-    cairo_line_to(cr, w - r, 0)
-    cairo_arc(cr, w - r, r, r, -math.pi / 2, 0)
-    cairo_line_to(cr, w, h - r)
-    cairo_arc(cr, w - r, h - r, r, 0, math.pi / 2)
-    cairo_line_to(cr, r, h)
-    cairo_arc(cr, r, h - r, r, math.pi / 2, math.pi)
-    cairo_line_to(cr, 0, r)
-    cairo_arc(cr, r, r, r, math.pi, 3 * math.pi / 2)
-    cairo_close_path(cr)
-
-    cairo_set_source_rgba(cr, R, G, B, A)
-    cairo_fill(cr)
-
-    cairo_destroy(cr)
-    cairo_surface_destroy(surface)
-end
-EOF
-        ok "рисовалка фона: $LUA"
-
-        if [ ! -f "$CONKY_BAK" ]; then
-            cp "$CONKY_CONF" "$CONKY_BAK"
-            ok "резервная копия конфига: $CONKY_BAK"
-        fi
-
-        sed -i "s|own_window_argb_value = [0-9]*|own_window_argb_value = 0|" "$CONKY_CONF"
-
-        if grep -q 'lua_load' "$CONKY_CONF"; then
-            sed -i "s|lua_load = '[^']*'|lua_load = '$LUA'|" "$CONKY_CONF"
+if [ -z "$SRC_ICON" ]; then
+    bad "темы иконок $BASE_ICON нет — значки оставляю прежними"
+else
+    rm -rf "$ICON_DIR"
+    mkdir -p "$ICON_DIR/symbolic/actions"
+    GOT=0
+    for n in close maximize minimize restore; do
+        F="$ICON_DIR/symbolic/actions/window-$n-symbolic.svg"
+        CODE=$(curl -sf -L --max-time 30 -o "$F" -w '%{http_code}' \
+               "$FLUENT/window-$n-symbolic.svg" 2>/dev/null)
+        if [ "$CODE" = "200" ]; then
+            if head -c 200 "$F" 2>/dev/null | grep -q '<svg'; then
+                GOT=$((GOT + 1))
+            else
+                rm -f "$F"
+            fi
         else
-            sed -i "0,/conky.config = {/s|conky.config = {|conky.config = {\n    lua_load = '$LUA',|" "$CONKY_CONF"
+            rm -f "$F"
         fi
+    done
 
-        if ! grep -q 'lua_draw_hook_pre' "$CONKY_CONF"; then
-            sed -i "s|lua_load = '$LUA',|lua_load = '$LUA',\n    lua_draw_hook_pre = 'draw_bg',|" "$CONKY_CONF"
-        fi
-        ok "конфиг conky обновлён"
+    if [ "$GOT" -ne 4 ]; then
+        bad "скачалось $GOT из 4 — значки оставляю прежними"
+        rm -rf "$ICON_DIR"
+    else
+        cat > "$ICON_DIR/index.theme" <<EOF
+[Icon Theme]
+Name=$NEW_ICON
+Comment=$BASE_ICON с кнопками заголовка из Fluent
+Inherits=$BASE_ICON,Adwaita,hicolor
+Directories=symbolic/actions
 
-        restart_conky
+[symbolic/actions]
+Size=16
+MinSize=8
+MaxSize=512
+Context=Actions
+Type=Scalable
+EOF
+        gtk-update-icon-cache -f "$ICON_DIR" >/dev/null 2>&1
+        gi_set icon-theme "$NEW_ICON"
+        ok "значки Fluent поверх $BASE_ICON"
     fi
 fi
 
-# ---------------------------------------------------------------- итог
-
-# ---------------------------------------------------------------- шрифт
-
+# --- 4. шрифт ---------------------------------------------------------
 if [ -n "$FONT" ]; then
     echo "==> шрифт интерфейса"
-    mkdir -p "$STATE"
-    if [ ! -f "$BEFORE" ]; then
-        echo "FONT_WAS=$(fget)" > "$BEFORE"
-        ok "прежний шрифт записан: $(fget)"
-    fi
-    if fc-list 2>/dev/null | grep -qi "$(echo "$FONT" | sed 's/ [0-9]*$//')"; then
-        fset "$FONT"
+    NAME=$(echo "$FONT" | sed 's/ [0-9]*$//')
+    if fc-list 2>/dev/null | grep -qi "$NAME"; then
+        gi_set font-name "$FONT"
         ok "шрифт: $FONT"
     else
-        bad "шрифта '$FONT' нет в системе — не менял"
-        echo "     что есть:  fc-list --format='%{family[0]}\\n' | sort -u | head -30"
+        bad "шрифта '$NAME' в системе нет — не менял"
     fi
 fi
 
-restart_apps
+# --- 5. переключаемся -------------------------------------------------
+echo "==> переключение"
+gi_set gtk-theme "$NEW_GTK"
+ok "тема окон: $NEW_GTK"
 
+if command -v nautilus >/dev/null 2>&1; then
+    nautilus -q >/dev/null 2>&1
+    ok "Nautilus закрыт — откроется с новым видом"
+fi
+
+# --- 6. что реально применилось ---------------------------------------
 echo
-echo "проверка значков:"
-python3 - "$THEME" <<'PY' 2>/dev/null
+echo "==> проверка"
+echo "  тема окон:    $(gi_get gtk-theme)"
+echo "  тема иконок:  $(gi_get icon-theme)"
+echo "  правил в GTK3: $(grep -c '!important' "$THEME_DIR/gtk-3.0/gtk.css" 2>/dev/null)"
+echo "  правил в GTK4: $(grep -c '!important' "$THEME_DIR/gtk-4.0/gtk.css" 2>/dev/null)"
+
+python3 - "$NEW_ICON" <<'PY' 2>/dev/null
 import sys
 try:
     import gi
     gi.require_version('Gtk', '3.0')
     from gi.repository import Gtk
 except Exception:
-    print('  python3-gi нет, значки не проверить')
     raise SystemExit(0)
-
 theme = Gtk.IconTheme.new()
 theme.set_custom_theme(sys.argv[1])
-for name in ('window-close-symbolic', 'window-maximize-symbolic',
-             'window-minimize-symbolic'):
+for name in ('window-close-symbolic', 'window-minimize-symbolic'):
     info = theme.lookup_icon(name, 16, 0)
     print('  %-26s %s' % (name, info.get_filename() if info else 'НЕ НАЙДЕНА'))
 PY
 
 echo
-echo "GTK3-окна подхватят сразу, GTK4 — после перезапуска приложения."
-echo "состояние:        $0 --check"
-echo "крупнее значки:   $0 --size 52 38 28"
-echo "если не видно:    $0 --diag"
-echo "вернуть как было: $0 --revert"
+echo "Открой папку заново. Если вид не изменился — перелогинься:"
+echo "оболочка кэширует тему до перезапуска сессии."
+echo
+echo "состояние:  $0 --check"
+echo "крупнее:    $0 --size 52 38 28"
+echo "вернуть:    $0 --revert"
