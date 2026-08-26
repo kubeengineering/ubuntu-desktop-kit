@@ -6,8 +6,10 @@
 #   ./look.sh --buttons         только кнопки заголовка
 #   ./look.sh --corners         только углы окон
 #   ./look.sh --widget 20       только виджет, радиус 20px
-#   ./look.sh --size 46 34 22   размер кнопок: ширина, высота, значок
+#   ./look.sh --size 52 38 28   размер кнопок: ширина, высота, значок
+#   ./look.sh --font "JetBrainsMono Nerd Font 11"   шрифт интерфейса
 #   ./look.sh --check           ничего не менять, показать состояние
+#   ./look.sh --diag            почему css мог не примениться
 #   ./look.sh --revert          вернуть всё как было
 #
 # Тема GTK, цветовая схема, папки, обои и панель НЕ трогаются.
@@ -36,22 +38,27 @@ set -uo pipefail
 DO_BUTTONS=0
 DO_CORNERS=0
 DO_WIDGET=0
-BTN_W=40
-BTN_H=32
-BTN_ICO=20
+BTN_W=46
+BTN_H=34
+BTN_ICO=24
 RADIUS=14
+FONT=""
 MODE="apply"
 PICKED=0
+STATE="$HOME/.local/state"
+BEFORE="$STATE/look-before.env"
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --buttons) DO_BUTTONS=1; PICKED=1; shift ;;
         --corners) DO_CORNERS=1; PICKED=1; shift ;;
         --widget)  DO_WIDGET=1; PICKED=1; RADIUS="${2:-14}"; shift 2 ;;
-        --size)    BTN_W="${2:-40}"; BTN_H="${3:-32}"; BTN_ICO="${4:-20}"; shift 4 ;;
+        --size)    BTN_W="${2:-46}"; BTN_H="${3:-34}"; BTN_ICO="${4:-24}"; shift 4 ;;
+        --font)    FONT="${2:-JetBrainsMono Nerd Font 11}"; PICKED=1; shift 2 ;;
+        --diag)    MODE="diag"; shift ;;
         --check)   MODE="check"; shift ;;
         --revert)  MODE="revert"; shift ;;
-        -h|--help) sed -n '2,15p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
+        -h|--help) sed -n '2,17p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
         *) echo "неизвестный аргумент: $1"; echo "подсказка: $0 --help"; exit 1 ;;
     esac
 done
@@ -75,6 +82,16 @@ bad() { echo "  ✗ $*"; }
 
 gget() { gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'"; }
 gset() { gsettings set org.gnome.desktop.interface icon-theme "$1" 2>/dev/null; }
+fget() { gsettings get org.gnome.desktop.interface font-name 2>/dev/null | tr -d "'"; }
+fset() { gsettings set org.gnome.desktop.interface font-name "$1" 2>/dev/null; }
+
+# GTK читает css при старте приложения: без перезапуска правки не видны
+restart_apps() {
+    if command -v nautilus >/dev/null 2>&1; then
+        nautilus -q >/dev/null 2>&1
+        ok "Nautilus закрыт — откроется уже с новым видом"
+    fi
+}
 
 strip_block() {
     if [ -f "$2" ]; then
@@ -132,8 +149,49 @@ if [ "$MODE" = "revert" ]; then
     else
         ok "conky не трогался"
     fi
+
+    if [ -f "$BEFORE" ]; then
+        . "$BEFORE"
+        if [ -n "${FONT_WAS:-}" ]; then
+            fset "$FONT_WAS"
+            ok "шрифт интерфейса возвращён: $FONT_WAS"
+        fi
+        rm -f "$BEFORE"
+    fi
+
+    restart_apps
     echo
     echo "перелогинься, чтобы применилось везде"
+    exit 0
+fi
+
+# ---------------------------------------------------------------- диагностика
+
+if [ "$MODE" = "diag" ]; then
+    echo "==> файлы"
+    for F in "$CSS3" "$CSS4"; do
+        if [ -f "$F" ]; then
+            echo "  $F — строк $(wc -l < "$F"), блоков: кнопки $(grep -c 'titlebuttons-begin' "$F"), углы $(grep -c 'corners-begin' "$F")"
+        else
+            echo "  $F — НЕТ"
+        fi
+    done
+
+    echo
+    echo "==> что GTK думает о нашем css"
+    echo "  (ошибки разбора означают, что правило целиком отброшено)"
+    if command -v nautilus >/dev/null 2>&1; then
+        nautilus -q >/dev/null 2>&1
+        sleep 1
+        timeout 12 env GTK_DEBUG=css nautilus --new-window >"$HOME/.cache/look-diag.log" 2>&1 &
+        sleep 6
+        nautilus -q >/dev/null 2>&1
+        grep -iE 'gtk.css|error|not a valid|unknown|expected' "$HOME/.cache/look-diag.log" 2>/dev/null \
+            | head -20 | sed 's/^/    /'
+        echo "  полный вывод: $HOME/.cache/look-diag.log"
+    else
+        echo "  nautilus не установлен, проверить нечем"
+    fi
     exit 0
 fi
 
@@ -162,6 +220,7 @@ if [ "$MODE" = "check" ]; then
     else
         bad "виджет не скруглён"
     fi
+    echo "  шрифт интерфейса: $(fget)"
     exit 0
 fi
 
@@ -224,17 +283,20 @@ Type=Scalable
 EOF
             gtk-update-icon-cache -f "$DIR" >/dev/null 2>&1
 
-            for F in "$CSS3" "$CSS4"; do
-                mkdir -p "$(dirname "$F")"
-                touch "$F"
-                strip_block titlebuttons "$F"
-                cat >> "$F" <<EOF
+            # GTK3 и GTK4 понимают РАЗНЫЙ набор свойств и селекторов:
+            # -gtk-outline-radius и decoration есть только в GTK3, и на
+            # неизвестном свойстве GTK4 отбрасывает правило целиком.
+            # Поэтому блоки пишутся раздельно.
+            mkdir -p "$(dirname "$CSS3")" "$(dirname "$CSS4")"
+            touch "$CSS3" "$CSS4"
+            strip_block titlebuttons "$CSS3"
+            strip_block titlebuttons "$CSS4"
+
+            cat >> "$CSS3" <<EOF
 /* titlebuttons-begin */
 headerbar button.titlebutton,
 .titlebar button.titlebutton,
-headerbar windowcontrols button,
-windowcontrols button,
-windowcontrols > button {
+button.titlebutton {
   min-width: ${BTN_W}px !important;
   min-height: ${BTN_H}px !important;
   padding: 0 !important;
@@ -251,9 +313,7 @@ windowcontrols > button {
 
 headerbar button.titlebutton:hover,
 .titlebar button.titlebutton:hover,
-headerbar windowcontrols button:hover,
-windowcontrols button:hover,
-windowcontrols > button:hover {
+button.titlebutton:hover {
   background-color: alpha(currentColor, 0.14) !important;
   background-image: none !important;
   border-radius: 0 !important;
@@ -261,18 +321,14 @@ windowcontrols > button:hover {
 
 headerbar button.titlebutton:active,
 .titlebar button.titlebutton:active,
-headerbar windowcontrols button:active,
-windowcontrols button:active,
-windowcontrols > button:active {
+button.titlebutton:active {
   background-color: alpha(currentColor, 0.22) !important;
   border-radius: 0 !important;
 }
 
 headerbar button.titlebutton.close:hover,
 .titlebar button.titlebutton.close:hover,
-headerbar windowcontrols button.close:hover,
-windowcontrols button.close:hover,
-windowcontrols > button.close:hover {
+button.titlebutton.close:hover {
   background-color: #e81123 !important;
   background-image: none !important;
   color: #ffffff !important;
@@ -281,9 +337,7 @@ windowcontrols > button.close:hover {
 
 headerbar button.titlebutton.close:active,
 .titlebar button.titlebutton.close:active,
-headerbar windowcontrols button.close:active,
-windowcontrols button.close:active,
-windowcontrols > button.close:active {
+button.titlebutton.close:active {
   background-color: #c50f1f !important;
   color: #ffffff !important;
   border-radius: 0 !important;
@@ -291,13 +345,71 @@ windowcontrols > button.close:active {
 
 headerbar button.titlebutton image,
 .titlebar button.titlebutton image,
-windowcontrols button image,
-windowcontrols > button image {
+button.titlebutton image {
   -gtk-icon-size: ${BTN_ICO}px !important;
 }
 /* titlebuttons-end */
 EOF
-            done
+
+            cat >> "$CSS4" <<EOF
+/* titlebuttons-begin */
+windowcontrols button,
+windowcontrols > button,
+headerbar windowcontrols button,
+.titlebar windowcontrols button {
+  min-width: ${BTN_W}px !important;
+  min-height: ${BTN_H}px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: none !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  outline: none !important;
+}
+
+windowcontrols button:hover,
+windowcontrols > button:hover,
+headerbar windowcontrols button:hover {
+  background-color: alpha(currentColor, 0.14) !important;
+  background-image: none !important;
+  border-radius: 0 !important;
+}
+
+windowcontrols button:active,
+windowcontrols > button:active,
+headerbar windowcontrols button:active {
+  background-color: alpha(currentColor, 0.22) !important;
+  border-radius: 0 !important;
+}
+
+windowcontrols button.close:hover,
+windowcontrols > button.close:hover,
+headerbar windowcontrols button.close:hover {
+  background-color: #e81123 !important;
+  background-image: none !important;
+  color: #ffffff !important;
+  border-radius: 0 !important;
+}
+
+windowcontrols button.close:active,
+windowcontrols > button.close:active,
+headerbar windowcontrols button.close:active {
+  background-color: #c50f1f !important;
+  color: #ffffff !important;
+  border-radius: 0 !important;
+}
+
+windowcontrols button image,
+windowcontrols > button image {
+  -gtk-icon-size: ${BTN_ICO}px !important;
+  min-width: ${BTN_ICO}px !important;
+  min-height: ${BTN_ICO}px !important;
+}
+/* titlebuttons-end */
+EOF
 
             gset "$THEME"
             ok "значки Fluent поверх $BASE"
@@ -310,15 +422,16 @@ fi
 
 if [ "$DO_CORNERS" -eq 1 ]; then
     echo "==> углы окон"
-    for F in "$CSS3" "$CSS4"; do
-        mkdir -p "$(dirname "$F")"
-        touch "$F"
-        strip_block corners "$F"
-        cat >> "$F" <<'EOF'
+    mkdir -p "$(dirname "$CSS3")" "$(dirname "$CSS4")"
+    touch "$CSS3" "$CSS4"
+    strip_block corners "$CSS3"
+    strip_block corners "$CSS4"
+
+    # GTK3: скругление живёт в decoration и в classic-виджетах меню
+    cat >> "$CSS3" <<'CSSEOF'
 /* corners-begin */
 decoration,
 decoration:backdrop,
-window,
 window.csd,
 window.csd:backdrop,
 window.background,
@@ -329,21 +442,38 @@ window.dialog-csd,
 headerbar,
 headerbar.titlebar,
 headerbar:backdrop,
-popover.background,
-popover > contents,
-popover > arrow,
 menu,
 .menu,
 .context-menu,
+popover.background,
 tooltip,
 tooltip.background,
-.card,
 .osd {
   border-radius: 0 !important;
 }
 /* corners-end */
-EOF
-    done
+CSSEOF
+
+    # GTK4: decoration и menu не существуют, зато есть popover > contents
+    cat >> "$CSS4" <<'CSSEOF'
+/* corners-begin */
+window,
+window.csd,
+window.background,
+window.dialog,
+.background,
+headerbar,
+.titlebar,
+popover > contents,
+popover > arrow,
+tooltip,
+.card,
+.osd,
+.toolbar {
+  border-radius: 0 !important;
+}
+/* corners-end */
+CSSEOF
     ok "скругление снято у окон, заголовков, меню и подсказок"
 fi
 
@@ -449,6 +579,26 @@ fi
 
 # ---------------------------------------------------------------- итог
 
+# ---------------------------------------------------------------- шрифт
+
+if [ -n "$FONT" ]; then
+    echo "==> шрифт интерфейса"
+    mkdir -p "$STATE"
+    if [ ! -f "$BEFORE" ]; then
+        echo "FONT_WAS=$(fget)" > "$BEFORE"
+        ok "прежний шрифт записан: $(fget)"
+    fi
+    if fc-list 2>/dev/null | grep -qi "$(echo "$FONT" | sed 's/ [0-9]*$//')"; then
+        fset "$FONT"
+        ok "шрифт: $FONT"
+    else
+        bad "шрифта '$FONT' нет в системе — не менял"
+        echo "     что есть:  fc-list --format='%{family[0]}\\n' | sort -u | head -30"
+    fi
+fi
+
+restart_apps
+
 echo
 echo "проверка значков:"
 python3 - "$THEME" <<'PY' 2>/dev/null
@@ -472,5 +622,6 @@ PY
 echo
 echo "GTK3-окна подхватят сразу, GTK4 — после перезапуска приложения."
 echo "состояние:        $0 --check"
-echo "другой размер:    $0 --size 46 34 22"
+echo "крупнее значки:   $0 --size 52 38 28"
+echo "если не видно:    $0 --diag"
 echo "вернуть как было: $0 --revert"
