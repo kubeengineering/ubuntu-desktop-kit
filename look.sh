@@ -99,6 +99,26 @@ strip_block() {
     fi
 }
 
+# Тема, поставленная с флагом -l, вешает СИМЛИНК ~/.config/gtk-4.0/gtk.css
+# на свой файл. Дописывать туда нельзя: правки уедут в тему и пропадут при
+# её переустановке. Заменяем ссылку обычным файлом, который подключает
+# тему через @import — так и тема на месте, и наши правила отдельно.
+ensure_own_css() {
+    F="$1"
+    mkdir -p "$(dirname "$F")"
+    if [ -L "$F" ]; then
+        TARGET=$(readlink -f "$F")
+        rm -f "$F"
+        {
+            echo "/* сюда указывал симлинк темы, подключаем её как есть */"
+            echo "@import url(\"file://$TARGET\");"
+        } > "$F"
+        ok "симлинк заменён файлом с @import: $(basename "$(dirname "$F")")"
+        echo "     тема подключена из $TARGET"
+    fi
+    touch "$F"
+}
+
 CUR=$(gget)
 BASE="$CUR"
 case "$CUR" in *-Fluent-Titlebar) BASE="${CUR%-Fluent-Titlebar}" ;; esac
@@ -170,8 +190,14 @@ fi
 if [ "$MODE" = "diag" ]; then
     echo "==> файлы"
     for F in "$CSS3" "$CSS4"; do
-        if [ -f "$F" ]; then
+        if [ -L "$F" ]; then
+            echo "  $F — СИМЛИНК на $(readlink -f "$F")"
+            echo "     это файл темы: наши правила туда писать нельзя"
+        elif [ -f "$F" ]; then
             echo "  $F — строк $(wc -l < "$F"), блоков: кнопки $(grep -c 'titlebuttons-begin' "$F"), углы $(grep -c 'corners-begin' "$F")"
+            if grep -q '@import' "$F"; then
+                echo "     тема подключена через @import — это нормально"
+            fi
         else
             echo "  $F — НЕТ"
         fi
@@ -287,8 +313,8 @@ EOF
             # -gtk-outline-radius и decoration есть только в GTK3, и на
             # неизвестном свойстве GTK4 отбрасывает правило целиком.
             # Поэтому блоки пишутся раздельно.
-            mkdir -p "$(dirname "$CSS3")" "$(dirname "$CSS4")"
-            touch "$CSS3" "$CSS4"
+            ensure_own_css "$CSS3"
+            ensure_own_css "$CSS4"
             strip_block titlebuttons "$CSS3"
             strip_block titlebuttons "$CSS4"
 
@@ -422,8 +448,8 @@ fi
 
 if [ "$DO_CORNERS" -eq 1 ]; then
     echo "==> углы окон"
-    mkdir -p "$(dirname "$CSS3")" "$(dirname "$CSS4")"
-    touch "$CSS3" "$CSS4"
+    ensure_own_css "$CSS3"
+    ensure_own_css "$CSS4"
     strip_block corners "$CSS3"
     strip_block corners "$CSS4"
 
