@@ -23,8 +23,20 @@ set -uo pipefail
 
 SIZE="${1:-32}"
 ICO="${2:-18}"
-THEME="Papirus-Fluent-Titlebar"
-BASE="Papirus-Dark"
+
+# За базу берём тему иконок, которая стоит сейчас: так скрипт работает и
+# поверх Papirus, и поверх Tela-circle, и поверх любой другой. Если стоит
+# уже наш наследник — вытаскиваем из него исходную базу, чтобы не
+# наследоваться самим от себя.
+CUR=$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'")
+BASE="$CUR"
+case "$CUR" in
+    *-Fluent-Titlebar) BASE="${CUR%-Fluent-Titlebar}" ;;
+esac
+if [ -z "$BASE" ]; then
+    BASE="Papirus-Dark"
+fi
+THEME="$BASE-Fluent-Titlebar"
 DIR="$HOME/.local/share/icons/$THEME"
 # Маркеры намеренно без звёздочек и слэшей внутри: они попадают в адрес
 # sed, где /* читалось бы как регулярное выражение и диапазон не находился
@@ -67,7 +79,8 @@ for d in "$HOME/.local/share/icons/$BASE" "$HOME/.icons/$BASE" "/usr/share/icons
     fi
 done
 if [ -z "$FOUND" ]; then
-    echo "✗ темы иконок $BASE нет — сначала: sudo apt install papirus-icon-theme"
+    echo "✗ темы иконок $BASE нет ни в ~/.local/share/icons, ни в /usr/share/icons"
+    echo "  сейчас выбрана: $CUR"
     exit 1
 fi
 echo "✓ базовая тема: $FOUND"
