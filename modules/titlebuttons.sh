@@ -1,77 +1,82 @@
 #!/usr/bin/env bash
-# Крупные тонкие кнопки заголовка окна, без круглой подложки.
+# Кнопки заголовка в стиле Windows: тонкие значки, квадратная подсветка,
+# красный квадрат на закрытии. Больше ничего не трогает.
 #
-#   ./titlebuttons.sh              кнопка 32px, значок 18px
-#   ./titlebuttons.sh 36 20        свои размеры
+#   ./titlebuttons.sh              кнопка 40x32, значок 20
+#   ./titlebuttons.sh 46 32 20     ширина, высота, значок
 #   ./titlebuttons.sh --revert     вернуть как было
 #
+# Тема GTK, цветовая схема, папки, обои и панель не затрагиваются.
+#
 # Кнопку рисуют два источника: форму значка даёт тема иконок, размер и
-# подложку — тема GTK. Поэтому правится и то, и другое:
+# подложку — тема GTK. Поэтому скрипт делает две вещи:
 #
-#   1. Создаётся тема иконок Papirus-Fluent-Titlebar. Она наследует
-#      Papirus-Dark целиком и переопределяет ровно четыре значка,
-#      взятые из Fluent-icon-theme. Папки, приложения и всё остальное
-#      остаются папирусными, а обновления Papirus правки не затирают.
-#   2. В ~/.config/gtk-3.0/gtk.css и gtk-4.0/gtk.css пишется блок с
-#      размером кнопки. Он помечен маркерами и при повторном запуске
-#      заменяется, а не дублируется.
+#   1. Создаёт тему иконок ИМЯ-Fluent-Titlebar, которая наследует текущую
+#      целиком и переопределяет ровно четыре значка, взятых из Fluent.
+#      Папки и приложения остаются прежними, обновления не затирают.
+#   2. Пишет размер и подсветку в ~/.config/gtk-3.0/gtk.css и gtk-4.0/gtk.css.
+#      КАЖДОЕ свойство с !important: в темах вроде Graphite правило
+#      button.titlebutton:not(.suggested-action):not(.destructive-action)
+#      специфичнее пользовательского, и без !important подложка остаётся
+#      круглой, сколько её ни переопределяй.
 #
-# Не подействует на Chrome, Tabby и Telegram: это Electron, они рисуют
-# кнопки сами.
+# Chrome, Tabby и Telegram не изменятся: это Electron, они рисуют кнопки сами.
 
 set -uo pipefail
 
-SIZE="${1:-32}"
-ICO="${2:-18}"
+BTN_W="${1:-40}"
+BTN_H="${2:-32}"
+BTN_ICO="${3:-20}"
+FLUENT="https://raw.githubusercontent.com/vinceliuice/Fluent-icon-theme/master/src/symbolic/actions"
 
-# За базу берём тему иконок, которая стоит сейчас: так скрипт работает и
-# поверх Papirus, и поверх Tela-circle, и поверх любой другой. Если стоит
-# уже наш наследник — вытаскиваем из него исходную базу, чтобы не
-# наследоваться самим от себя.
-CUR=$(gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'")
+ok()  { echo "  ✓ $*"; }
+bad() { echo "  ✗ $*"; }
+
+gget() { gsettings get org.gnome.desktop.interface icon-theme 2>/dev/null | tr -d "'"; }
+gset() { gsettings set org.gnome.desktop.interface icon-theme "$1" 2>/dev/null; }
+
+strip_block() {
+    if [ -f "$1" ]; then
+        sed -i '/titlebuttons-begin/,/titlebuttons-end/d' "$1"
+    fi
+}
+
+CUR=$(gget)
 BASE="$CUR"
-case "$CUR" in
-    *-Fluent-Titlebar) BASE="${CUR%-Fluent-Titlebar}" ;;
-esac
+case "$CUR" in *-Fluent-Titlebar) BASE="${CUR%-Fluent-Titlebar}" ;; esac
 if [ -z "$BASE" ]; then
-    BASE="Papirus-Dark"
+    BASE="Adwaita"
 fi
 THEME="$BASE-Fluent-Titlebar"
 DIR="$HOME/.local/share/icons/$THEME"
-# Маркеры намеренно без звёздочек и слэшей внутри: они попадают в адрес
-# sed, где /* читалось бы как регулярное выражение и диапазон не находился
-MARK_A="/* titlebuttons-begin */"
-MARK_B="/* titlebuttons-end */"
 
-SRC="https://raw.githubusercontent.com/vinceliuice/Fluent-icon-theme/master/src/symbolic/actions"
+# ---------------------------------------------------------------- откат
 
-# ---------- вырезать наш блок из gtk.css, не трогая остальное ----------
-strip_block() {
-    F="$1"
-    if [ ! -f "$F" ]; then
-        return
-    fi
-    sed -i '/titlebuttons-begin/,/titlebuttons-end/d' "$F"
-}
-
-# ---------- откат ----------
-if [ "$SIZE" = "--revert" ]; then
+if [ "$BTN_W" = "--revert" ]; then
     strip_block "$HOME/.config/gtk-3.0/gtk.css"
     strip_block "$HOME/.config/gtk-4.0/gtk.css"
-    rm -rf "$DIR"
-    gsettings set org.gnome.desktop.interface icon-theme "$BASE"
-    gtk-update-icon-cache -f "$HOME/.local/share/icons" 2>/dev/null
-    echo "✓ вернул тему иконок $BASE и убрал блок из gtk.css"
-    echo "  перелогинься, чтобы применилось везде"
+    case "$CUR" in
+        *-Fluent-Titlebar)
+            rm -rf "$HOME/.local/share/icons/$CUR"
+            gset "$BASE"
+            ok "тема иконок возвращена: $BASE"
+            ;;
+        *)  ok "тема иконок и так своя: $CUR" ;;
+    esac
+    ok "блок из gtk.css убран"
+    echo "готово"
     exit 0
 fi
 
-if ! echo "$SIZE$ICO" | grep -qE '^[0-9]+$'; then
-    echo "✗ размеры — числа: $0 32 18"
-    exit 1
-fi
+for v in "$BTN_W" "$BTN_H" "$BTN_ICO"; do
+    if ! echo "$v" | grep -qE '^[0-9]+$'; then
+        bad "размеры — числа: $0 46 32 20"
+        exit 1
+    fi
+done
 
-# ---------- базовая тема на месте? ----------
+# ---------------------------------------------------------------- значки
+
 FOUND=""
 for d in "$HOME/.local/share/icons/$BASE" "$HOME/.icons/$BASE" "/usr/share/icons/$BASE"; do
     if [ -d "$d" ]; then
@@ -79,22 +84,20 @@ for d in "$HOME/.local/share/icons/$BASE" "$HOME/.icons/$BASE" "/usr/share/icons
     fi
 done
 if [ -z "$FOUND" ]; then
-    echo "✗ темы иконок $BASE нет ни в ~/.local/share/icons, ни в /usr/share/icons"
-    echo "  сейчас выбрана: $CUR"
+    bad "темы иконок $BASE нет ни в ~/.local/share/icons, ни в /usr/share/icons"
     exit 1
 fi
-echo "✓ базовая тема: $FOUND"
+ok "базовая тема: $BASE"
 
-# ---------- забираем четыре значка ----------
 mkdir -p "$DIR/symbolic/actions"
-OK=0
+GOT=0
 for n in close maximize minimize restore; do
     F="$DIR/symbolic/actions/window-$n-symbolic.svg"
     CODE=$(curl -sf -L --max-time 30 -o "$F" -w '%{http_code}' \
-           "$SRC/window-$n-symbolic.svg")
+           "$FLUENT/window-$n-symbolic.svg" 2>/dev/null)
     if [ "$CODE" = "200" ]; then
-        if head -c 200 "$F" | grep -q '<svg'; then
-            OK=$((OK + 1))
+        if head -c 200 "$F" 2>/dev/null | grep -q '<svg'; then
+            GOT=$((GOT + 1))
         else
             rm -f "$F"
         fi
@@ -103,19 +106,18 @@ for n in close maximize minimize restore; do
     fi
 done
 
-if [ "$OK" -ne 4 ]; then
-    echo "✗ скачалось значков: $OK из 4 — проверь сеть, ничего не менял"
+if [ "$GOT" -ne 4 ]; then
+    bad "значков скачалось $GOT из 4 — ничего не менял"
     rm -rf "$DIR"
     exit 1
 fi
-echo "✓ значки Fluent: $OK из 4"
+ok "значки Fluent: 4 из 4"
 
-# ---------- описание темы ----------
 cat > "$DIR/index.theme" <<EOF
 [Icon Theme]
 Name=$THEME
 Comment=$BASE с кнопками заголовка из Fluent
-Inherits=$BASE,Papirus,Adwaita,hicolor
+Inherits=$BASE,Adwaita,hicolor
 Directories=symbolic/actions
 
 [symbolic/actions]
@@ -126,65 +128,120 @@ Context=Actions
 Type=Scalable
 EOF
 
-gtk-update-icon-cache -f "$DIR" 2>/dev/null
-echo "✓ тема иконок создана: $DIR"
+gtk-update-icon-cache -f "$DIR" >/dev/null 2>&1
+ok "тема иконок: $THEME"
 
-# ---------- размер кнопки для GTK3 и GTK4 ----------
+# ---------------------------------------------------------------- css
+
 write_css() {
     F="$1"
     mkdir -p "$(dirname "$F")"
     touch "$F"
     strip_block "$F"
     cat >> "$F" <<EOF
-$MARK_A
-/* кнопки заголовка: крупнее и без круглой подложки.
-   Убрать всё это можно так: ./titlebuttons.sh --revert */
+/* titlebuttons-begin */
+/* Квадратная подсветка вместо круглой подложки темы.
+   !important обязателен: правило темы специфичнее пользовательского. */
 headerbar button.titlebutton,
 .titlebar button.titlebutton,
-windowcontrols button {
-  min-width: ${SIZE}px;
-  min-height: ${SIZE}px;
-  padding: 0;
-  margin: 0 2px;
-  background: none;
-  box-shadow: none;
-  border: none;
-  border-radius: 8px;
+headerbar windowcontrols button,
+windowcontrols button,
+windowcontrols > button {
+  min-width: ${BTN_W}px !important;
+  min-height: ${BTN_H}px !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  background: none !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  box-shadow: none !important;
+  border: none !important;
+  border-radius: 0 !important;
+  outline: none !important;
+  -gtk-outline-radius: 0 !important;
 }
 
 headerbar button.titlebutton:hover,
 .titlebar button.titlebutton:hover,
-windowcontrols button:hover {
-  background: alpha(currentColor, 0.12);
+headerbar windowcontrols button:hover,
+windowcontrols button:hover,
+windowcontrols > button:hover {
+  background-color: alpha(currentColor, 0.14) !important;
+  background-image: none !important;
+  border-radius: 0 !important;
+}
+
+headerbar button.titlebutton:active,
+.titlebar button.titlebutton:active,
+headerbar windowcontrols button:active,
+windowcontrols button:active,
+windowcontrols > button:active {
+  background-color: alpha(currentColor, 0.22) !important;
+  border-radius: 0 !important;
 }
 
 headerbar button.titlebutton.close:hover,
 .titlebar button.titlebutton.close:hover,
-windowcontrols button.close:hover {
-  background: #e05561;
-  color: #ffffff;
+headerbar windowcontrols button.close:hover,
+windowcontrols button.close:hover,
+windowcontrols > button.close:hover {
+  background-color: #e81123 !important;
+  background-image: none !important;
+  color: #ffffff !important;
+  border-radius: 0 !important;
+}
+
+headerbar button.titlebutton.close:active,
+.titlebar button.titlebutton.close:active,
+headerbar windowcontrols button.close:active,
+windowcontrols button.close:active,
+windowcontrols > button.close:active {
+  background-color: #c50f1f !important;
+  color: #ffffff !important;
+  border-radius: 0 !important;
 }
 
 headerbar button.titlebutton image,
 .titlebar button.titlebutton image,
-windowcontrols button image {
-  -gtk-icon-size: ${ICO}px;
+windowcontrols button image,
+windowcontrols > button image {
+  -gtk-icon-size: ${BTN_ICO}px !important;
 }
-$MARK_B
+/* titlebuttons-end */
 EOF
 }
 
 write_css "$HOME/.config/gtk-3.0/gtk.css"
 write_css "$HOME/.config/gtk-4.0/gtk.css"
-echo "✓ размер прописан: кнопка ${SIZE}px, значок ${ICO}px"
+ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px, подсветка квадратная"
 
-# ---------- включаем ----------
-gsettings set org.gnome.desktop.interface icon-theme "$THEME"
-echo "✓ тема иконок включена"
+gset "$THEME"
+
+# ---------------------------------------------------------------- проверка
 
 echo
-echo "GTK3-приложения подхватят сразу, GTK4 — после перезапуска приложения."
-echo "Chrome, Tabby и Telegram не изменятся: они рисуют кнопки сами."
+echo "проверка:"
+python3 - "$THEME" <<'PY' 2>/dev/null
+import sys
+try:
+    import gi
+    gi.require_version('Gtk', '3.0')
+    from gi.repository import Gtk
+except Exception:
+    print('  python3-gi нет, значки не проверить')
+    raise SystemExit(0)
+
+theme = Gtk.IconTheme.new()
+theme.set_custom_theme(sys.argv[1])
+for name in ('window-close-symbolic', 'window-maximize-symbolic',
+             'window-minimize-symbolic'):
+    info = theme.lookup_icon(name, 16, 0)
+    print('  %-26s %s' % (name, info.get_filename() if info else 'НЕ НАЙДЕНА'))
+PY
+
 echo
-echo "другой размер:  $0 36 20"
+echo "GTK3-окна (Nautilus, Evolution) подхватят сразу или после перезапуска."
+echo "GTK4 — после перезапуска приложения. Оболочка не трогалась."
+echo
+echo "другой размер:    $0 46 32 22"
 echo "вернуть как было: $0 --revert"
