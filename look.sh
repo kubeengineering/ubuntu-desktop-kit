@@ -6,6 +6,9 @@
 #   ./look.sh --size 46 34 24     ширина, высота кнопки, размер значка
 #   ./look.sh --font "JetBrainsMono Nerd Font 11"   шрифт интерфейса
 #   ./look.sh --widget 18         скруглить виджет conky на 18px
+#   ./look.sh --window-radius 6   скругление углов окон, 0 = острые
+#   ./look.sh --no-import         не подключать тему в GTK4 (если правила
+#                                 не применяются — виноват может быть импорт)
 #   ./look.sh --check             что сейчас применено
 #   ./look.sh --revert            вернуть исходную тему
 #
@@ -43,6 +46,8 @@ BTN_W=46
 BTN_H=34
 BTN_ICO=24
 DO_CORNERS=1
+NO_IMPORT=0
+WIN_RADIUS=0
 FONT=""
 WIDGET=""
 MODE="apply"
@@ -53,6 +58,8 @@ while [ $# -gt 0 ]; do
         --size)       BTN_W="${2:-46}"; BTN_H="${3:-34}"; BTN_ICO="${4:-24}"; shift 4 ;;
         --font)       FONT="${2:-}"; shift 2 ;;
         --widget)     WIDGET="${2:-18}"; shift 2 ;;
+        --window-radius) WIN_RADIUS="${2:-0}"; shift 2 ;;
+        --no-import)  NO_IMPORT=1; shift ;;
         --check)      MODE="check"; shift ;;
         --revert)     MODE="revert"; shift ;;
         -h|--help)    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -208,7 +215,10 @@ if [ "$MODE" = "check" ]; then
     if [ -d "$THEME_DIR" ]; then
         if grep -q 'squarebuttons-begin' "$THEME_DIR/gtk-3.0/gtk.css" 2>/dev/null; then
             ok "копия темы на месте, правила внутри неё"
-            grep -m1 'min-width' "$THEME_DIR/gtk-3.0/gtk.css" | sed 's/^/     GTK3: /'
+            sed -n '/squarebuttons-begin/,/squarebuttons-end/p' "$THEME_DIR/gtk-3.0/gtk.css" \
+                | grep -m1 'min-width' | sed 's/^/     GTK3: /'
+            sed -n '/squarebuttons-begin/,/squarebuttons-end/p' "$THEME_DIR/gtk-3.0/gtk.css" \
+                | grep -m1 'border-radius' | sed 's/^/     углы: /'
         else
             bad "копия темы есть, но правил в ней нет"
         fi
@@ -217,7 +227,8 @@ if [ "$MODE" = "check" ]; then
     fi
     if grep -q 'squarebuttons-begin' "$USER_CSS4" 2>/dev/null; then
         ok "GTK4-правила в ~/.config/gtk-4.0/gtk.css"
-        grep -m1 'gtk-icon-size' "$USER_CSS4" | sed 's/^/     GTK4: /'
+        sed -n '/squarebuttons-begin/,/squarebuttons-end/p' "$USER_CSS4" \
+            | grep -m1 'gtk-icon-size' | sed 's/^/     GTK4: /'
         if grep -q '@import' "$USER_CSS4"; then
             echo "     тема подключена импортом"
         fi
@@ -288,6 +299,10 @@ SCALE=$(awk "BEGIN{printf \"%.2f\", $BTN_ICO/16}")
 CORNERS3=""
 CORNERS4=""
 if [ "$DO_CORNERS" -eq 1 ]; then
+    if ! echo "$WIN_RADIUS" | grep -qE '^[0-9]+$'; then
+        bad "радиус окна — число: $0 --window-radius 6"
+        exit 1
+    fi
     CORNERS3="
 decoration,
 decoration:backdrop,
@@ -302,7 +317,7 @@ menu,
 popover.background,
 tooltip,
 tooltip.background {
-  border-radius: 0 !important;
+  border-radius: ${WIN_RADIUS}px !important;
 }
 "
     CORNERS4="
@@ -317,7 +332,7 @@ popover > arrow,
 tooltip,
 .card,
 .toolbar {
-  border-radius: 0 !important;
+  border-radius: ${WIN_RADIUS}px !important;
 }
 "
 fi
@@ -425,6 +440,13 @@ fi
 touch "$USER_CSS4"
 sed -i '/squarebuttons-begin/,/squarebuttons-end/d' "$USER_CSS4"
 
+if [ "$NO_IMPORT" = "1" ]; then
+    IMPORT_LINE=""
+    sed -i '/@import/d' "$USER_CSS4"
+    bad "тема в GTK4 не подключена: окна возьмут стандартный вид Adwaita"
+    echo "     это диагностика — если круги пропадут, мешал импорт темы"
+fi
+
 if [ -n "$IMPORT_LINE" ]; then
     if ! grep -q '@import' "$USER_CSS4"; then
         printf '%s
@@ -525,7 +547,7 @@ ok "GTK4-правила в ~/.config/gtk-4.0/gtk.css (единственный �
 
 ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px (GTK3 через scale ${SCALE})"
 if [ "$DO_CORNERS" -eq 1 ]; then
-    ok "углы окон, меню и подсказок сделаны острыми"
+    ok "радиус окон, меню и подсказок: ${WIN_RADIUS}px"
 fi
 
 # --- 3. значки Fluent -------------------------------------------------
@@ -701,6 +723,16 @@ ok "тема окон: $NEW_GTK"
 if command -v nautilus >/dev/null 2>&1; then
     nautilus -q >/dev/null 2>&1
     ok "Nautilus закрыт — откроется с новым видом"
+fi
+
+# GTK3-приложения читают тему при старте. GNOME Terminal живёт как
+# gnome-terminal-server и сам её не перечитывает: пока сервер не убит,
+# вид не изменится, сколько окон ни открывай.
+if pgrep -x gnome-terminal-server >/dev/null 2>&1; then
+    echo
+    bad "gnome-terminal-server работает — терминал не увидит правок"
+    echo "     закрой его вручную (все вкладки закроются):"
+    echo "       pkill -x gnome-terminal-server"
 fi
 
 # --- 6. что реально применилось ---------------------------------------
