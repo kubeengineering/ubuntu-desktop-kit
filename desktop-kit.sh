@@ -576,9 +576,14 @@ buttons — кнопки заголовка: размер, значки, под�
   --gtk3-scale S        масштаб значка в GTK3, по умолчанию 1.0
                         (выше 1.3 значок пикселит: GTK3 растягивает готовый растр)
   --hover COLOR         подсветка при наведении, по умолчанию из цвета текста
+  --hover none          НЕ трогать фон кнопки: только размеры. Нужно темам,
+                        которые рисуют кнопки заголовка сами — WhiteSur и
+                        прочие macOS-подобные. Наши обычные правила гасят
+                        их фон, и кнопка становится пустой.
   --close COLOR         цвет кнопки закрытия, по умолчанию #e81123
   --radius N            скругление подсветки, по умолчанию 0 (квадрат)
   --glyphs fluent|keep  откуда брать значки, по умолчанию fluent
+  --diagnose            разобрать, почему значков не видно
 
   Значки Fluent ставятся темой-наследником: текущая тема иконок
   наследуется целиком, подменяются ровно четыре значка. Папки и
@@ -601,6 +606,121 @@ buttons — кнопки заголовка: размер, значки, под�
 EOF
 }
 
+# Разбор проблемы «значков не видно». Кнопку заголовка рисуют ТРИ
+# независимых источника: тема GTK (фон и размер), тема значков (форма
+# глифа) и наши правила. Команда показывает состояние всех трёх.
+diagnose_buttons() {
+    head1 "разбор кнопок заголовка"
+
+    local gtk_theme
+    local icon_theme
+    local base
+    gtk_theme=$(gi_get gtk-theme)
+    icon_theme=$(gi_get icon-theme)
+    base=$(icon_base_of "$icon_theme")
+    note "тема окон:    $gtk_theme"
+    note "тема значков: $icon_theme"
+    note "схема:        $(gi_get color-scheme)"
+
+    # 1. Наш наследник и его глифы
+    blank
+    local dir="$HOME/.local/share/icons/$icon_theme"
+    case "$icon_theme" in
+        *-dk-glyphs|*-Fluent-Titlebar)
+            if [ -d "$dir" ]; then
+                ok "каталог наследника есть: $dir"
+                local n
+                n=$(find "$dir" -name 'window-*-symbolic.svg' 2>/dev/null | wc -l)
+                note "значков заголовка в нём: $n из 4"
+                # Зашитый светлый цвет — самая частая причина «пропажи»
+                # на светлой теме: белый глиф на белом заголовке.
+                local svg
+                svg=$(find "$dir" -name 'window-close-symbolic.svg' 2>/dev/null | head -1)
+                if [ -n "$svg" ]; then
+                    local fills
+                    fills=$(grep -o 'fill="[^"]*"' "$svg" 2>/dev/null | sort -u | tr '
+' ' ')
+                    if [ -z "$fills" ]; then
+                        note "цвет в SVG не зашит — глиф перекрашивается темой"
+                    else
+                        note "цвета в SVG: $fills"
+                        case "$fills" in
+                            *'#fff'*|*'#FFF'*|*white*)
+                                bad "в глифе зашит белый цвет"
+                                note "на светлой теме он не виден — отсюда «значков нет»"
+                                note "лечится так: $0 buttons --glyphs keep"
+                                ;;
+                        esac
+                    fi
+                fi
+                if [ ! -d "$HOME/.local/share/icons/$base" ]; then
+                    if [ ! -d "$SYS_ICONS/$base" ]; then
+                        bad "базовая тема '$base' не найдена — наследовать не от чего"
+                        note "остальные значки будут запасными из Adwaita"
+                    fi
+                fi
+            else
+                bad "тема значков '$icon_theme' выбрана, а каталога нет"
+                note "именно так выглядят «пустые» кнопки: глиф взять неоткуда"
+                note "почини так: $0 buttons"
+            fi
+            ;;
+        *)
+            note "наш наследник не активен — глифы даёт сама тема значков"
+            ;;
+    esac
+
+    # 2. Наши правила
+    blank
+    local f
+    for f in "$CSS3" "$CSS4"; do
+        local label
+        label=$(basename "$(dirname "$f")")
+        if [ -f "$f" ]; then
+            if grep -q 'dk:buttons-begin' "$f"; then
+                ok "$label: наши правила есть"
+            else
+                note "$label: наших правил нет"
+            fi
+        else
+            note "$label: файла нет"
+        fi
+    done
+
+    # 3. Что про кнопки говорит сама тема GTK
+    blank
+    local tdir=""
+    for d in "$HOME/.themes/$gtk_theme" "$HOME/.local/share/themes/$gtk_theme"              "$SYS_THEMES/$gtk_theme"; do
+        if [ -d "$d" ]; then
+            tdir="$d"
+        fi
+    done
+    if [ -z "$tdir" ]; then
+        bad "каталог темы '$gtk_theme' не найден"
+    else
+        note "каталог темы: $tdir"
+        local t3="$tdir/gtk-3.0/gtk.css"
+        if [ -f "$t3" ]; then
+            local own
+            own=$(grep -c 'titlebutton' "$t3" 2>/dev/null)
+            note "упоминаний titlebutton в теме (GTK3): $own"
+            if grep -q 'titlebutton.*background-image\|background-image.*titlebutton' "$t3" 2>/dev/null; then
+                bad "тема рисует кнопки картинкой (background-image)"
+                note "наши правила её гасят — кнопка становится пустой"
+                note "для такой темы лучше: $0 buttons --glyphs keep --hover none"
+            fi
+        fi
+    fi
+
+    blank
+    note "если значки видно только под курсором — глиф сливается с фоном:"
+    note "  цвет глифа задаёт ТЕМА ЗНАЧКОВ, а фон заголовка — тема окон"
+    note "быстрые проверки:"
+    note "  $0 buttons --glyphs keep      родные значки темы, наша геометрия"
+    note "  $0 revert buttons             вернуть всё как было"
+    return 0
+}
+
 cmd_buttons() {
     local btn_w=46
     local btn_h=34
@@ -620,6 +740,7 @@ cmd_buttons() {
             --close) need_args "--close" 2 "$#"; close_colour="${2:-#e81123}"; shift 2 ;;
             --radius) need_args "--radius" 2 "$#"; radius="${2:-0}"; shift 2 ;;
             --glyphs) need_args "--glyphs" 2 "$#"; glyphs="${2:-fluent}"; shift 2 ;;
+            --diagnose)   diagnose_buttons; return $? ;;
             -h|--help)    help_buttons; return 0 ;;
             *) die "buttons: неизвестный параметр $1" ;;
         esac
@@ -633,9 +754,17 @@ cmd_buttons() {
     if ! is_decimal "$gtk3_scale"; then
         die "buttons: масштаб — число, например 1.0 или 1.25"
     fi
+    # «none» — режим минимального вмешательства: только размеры. Нужен
+    # темам, которые рисуют кнопки заголовка сами (WhiteSur и прочие
+    # macOS-подобные): наши правила гасят их фон, и кнопка пустеет.
+    local minimal=0
+    if [ "$hover_colour" = "none" ]; then
+        minimal=1
+        hover_colour=""
+    fi
     if [ -n "$hover_colour" ]; then
         if ! is_hex_colour "$hover_colour"; then
-            die "buttons: цвет в виде #rrggbb"
+            die "buttons: цвет в виде #rrggbb или none"
         fi
     fi
     if ! is_hex_colour "$close_colour"; then
@@ -644,6 +773,15 @@ cmd_buttons() {
 
     head1 "кнопки заголовка"
 
+    # Что именно мы гасим у кнопки. В минимальном режиме — ничего:
+    # тема сама рисует и фон, и глиф.
+    local bg_reset="  background-image: none;
+  box-shadow: none;
+  border: none;
+"
+    if [ "$minimal" = "1" ]; then
+        bg_reset=""
+    fi
     local hover_value="alpha(currentColor, 0.14)"
     local active_value="alpha(currentColor, 0.24)"
     if [ -n "$hover_colour" ]; then
@@ -683,6 +821,46 @@ cmd_buttons() {
         return 0
     fi
 
+    # Минимальный режим: тема рисует кнопки сама, мы только задаём размер.
+    # Никаких сбросов фона и своей подсветки — иначе кнопка пустеет.
+    if [ "$minimal" = "1" ]; then
+        css_append buttons "$CSS3" "$(cat <<EOF
+/* только размеры: фон и глиф оставлены теме */
+headerbar button.titlebutton,
+.titlebar button.titlebutton,
+button.titlebutton {
+  min-width: ${btn_w}px;
+  min-height: ${btn_h}px;
+}
+
+headerbar button.titlebutton image,
+.titlebar button.titlebutton image,
+button.titlebutton image {
+  -gtk-icon-transform: scale(${gtk3_scale});
+}
+EOF
+)"
+        css_append buttons "$CSS4" "$(cat <<EOF
+/* только размеры: фон и глиф оставлены теме */
+windowcontrols > button,
+headerbar windowcontrols > button {
+  min-width: ${btn_w}px;
+  min-height: ${btn_h}px;
+}
+
+windowcontrols > button > image {
+  -gtk-icon-size: ${btn_icon}px;
+}
+EOF
+)"
+        ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} — остальное оставлено теме"
+        if [ "$glyphs_ok" = "0" ]; then
+            note "значки Fluent не ставились"
+        fi
+        restart_gtk_apps
+        return 0
+    fi
+
     css_append buttons "$CSS3" "$(cat <<EOF
 /* GTK3: круг рисует сама кнопка (%circular-button в темах).
    -gtk-icon-size здесь не существует, размер значка — только масштабом. */
@@ -693,10 +871,7 @@ button.titlebutton {
   min-height: ${btn_h}px;
   padding: 0;
   margin: 0;
-  background-image: none;
-  box-shadow: none;
-  border: none;
-  border-radius: ${radius}px;
+${bg_reset}  border-radius: ${radius}px;
 }
 
 headerbar button.titlebutton image,
@@ -5541,6 +5716,16 @@ st_buttons() {
     t_eq "наследник не наслоился сам на себя" "Adwaita-dk-glyphs" \
         "$(sb_get org.gnome.desktop.interface icon-theme)"
     t_nofile "нет двойного наследника" "$SB/.local/share/icons/Adwaita-dk-glyphs-dk-glyphs"
+
+    # Минимальный режим для тем, рисующих кнопки самостоятельно
+    sandbox_drop
+    sandbox_new
+    sandbox_run buttons --glyphs keep --hover none
+    t_rc "минимальный режим отработал" 0
+    t_has "размер кнопки задан" "$SB/.config/gtk-4.0/gtk.css" "min-width: 46px"
+    t_hasnt "фон кнопки не тронут" "$SB/.config/gtk-4.0/gtk.css" "background-image: none"
+    t_hasnt "своей подсветки нет" "$SB/.config/gtk-4.0/gtk.css" "alpha(currentColor"
+    t_eq "тема значков не подменялась" "Adwaita"         "$(sb_get org.gnome.desktop.interface icon-theme)"
 
     # правила предшественника не должны сосуществовать с нашими
     sandbox_drop
