@@ -2,7 +2,8 @@
 # Кнопки заголовка, углы окон и виджет conky.
 #
 #   ./look.sh                     кнопки + острые углы
-#   ./look.sh --size 52 38 30     ширина, высота кнопки, размер значка
+#   ./look.sh --size 46 34 20     ширина, высота кнопки, размер значка (GTK4)
+#   ./look.sh --gtk3-scale 1.0    масштаб значка в GTK3, 1.0 = чётко
 #   ./look.sh --window-radius 6   скругление углов окон, 0 = острые
 #   ./look.sh --widget 12         скруглить виджет conky
 #   ./look.sh --font "Selawik 11" шрифт интерфейса
@@ -29,6 +30,13 @@
 #   Отсюда: никакого !important, никакой копии темы; тема GTK и цветовая
 #   схема не трогаются вовсе.
 #
+#   ПРО РАЗМЕР ЗНАЧКА. В GTK4 он задаётся до отрисовки (-gtk-icon-size),
+#   поэтому получается чётким при любом значении. В GTK3 такого свойства
+#   НЕТ: там иконка сперва растеризуется в 16px, а -gtk-icon-transform
+#   растягивает уже готовый растр — отсюда пикселизация при масштабе
+#   больше ~1.3. Поэтому масштаб GTK3 вынесен отдельным флагом и по
+#   умолчанию равен 1.0: в терминале значок останется мелким, но чётким.
+#
 #   В libadwaita фон и круг рисует НЕ кнопка, а её дочерний image:
 #     > image { background-color: $button_color; border-radius: 100%; }
 #     &:hover > image { background-color: $button_hover_color; }
@@ -38,9 +46,10 @@
 
 set -uo pipefail
 
-BTN_W=52
-BTN_H=38
-BTN_ICO=30
+BTN_W=46
+BTN_H=34
+BTN_ICO=20
+GTK3_SCALE=1.0
 WIN_RADIUS=0
 DO_CORNERS=1
 IMPORT_THEME=0
@@ -51,7 +60,8 @@ MODE="apply"
 
 while [ $# -gt 0 ]; do
     case "$1" in
-        --size)          BTN_W="${2:-52}"; BTN_H="${3:-38}"; BTN_ICO="${4:-30}"; shift 4 ;;
+        --size)          BTN_W="${2:-46}"; BTN_H="${3:-34}"; BTN_ICO="${4:-20}"; shift 4 ;;
+        --gtk3-scale)    GTK3_SCALE="${2:-1.0}"; shift 2 ;;
         --window-radius) WIN_RADIUS="${2:-0}"; shift 2 ;;
         --no-corners)    DO_CORNERS=0; shift ;;
         --widget)        WIDGET="${2:-12}"; shift 2 ;;
@@ -272,8 +282,13 @@ fi
 echo "==> правила"
 echo "     без !important: GTK его не понимает и выбрасывает всё правило"
 
-# GTK3 не знает -gtk-icon-size, там значок масштабируется трансформацией
-SCALE=$(awk "BEGIN{printf \"%.2f\", $BTN_ICO/16}")
+# GTK3: масштаб задаётся явно, а не выводится из размера значка —
+# растягивание готового растра выше ~1.3 даёт заметные пиксели
+SCALE="$GTK3_SCALE"
+if ! echo "$SCALE" | grep -qE '^[0-9]+(\.[0-9]+)?$'; then
+    bad "масштаб — число, например 1.0 или 1.25"
+    exit 1
+fi
 
 CORNERS3=""
 CORNERS4=""
@@ -329,6 +344,8 @@ headerbar button.titlebutton image,
 .titlebar button.titlebutton image,
 button.titlebutton image {
   -gtk-icon-transform: scale(${SCALE});
+  min-width: ${BTN_ICO}px;
+  min-height: ${BTN_ICO}px;
   background-color: transparent;
   background-image: none;
   border-radius: 0;
@@ -452,7 +469,7 @@ $CORNERS4
 /* look-end */
 EOF
 
-ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px"
+ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px (GTK4), масштаб GTK3 ${SCALE}"
 if [ "$DO_CORNERS" = "1" ]; then
     ok "радиус окон: ${WIN_RADIUS}px"
 fi
