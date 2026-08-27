@@ -318,6 +318,11 @@ headerbar button.titlebutton image,
 .titlebar button.titlebutton image,
 button.titlebutton image {
   -gtk-icon-transform: scale(${SCALE}) !important;
+  background-color: transparent !important;
+  background-image: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  box-shadow: none !important;
 }
 
 headerbar button.titlebutton:hover,
@@ -399,7 +404,10 @@ fi
 cat >> "$USER_CSS4" <<EOF
 
 /* squarebuttons-begin
-   В GTK4 узел называется windowcontrols, и здесь -gtk-icon-size работает. */
+   ГЛАВНОЕ: в libadwaita круглую подложку рисует НЕ кнопка, а её дочерний
+   image — там стоит border-radius: 100% и свой background-color. Правки
+   на самой кнопке круг не убирают, сколько их ни ставь. Поэтому фон и
+   радиус снимаются с image, а подсветка вешается на кнопку. */
 windowcontrols > button,
 windowcontrols button,
 headerbar windowcontrols > button {
@@ -418,6 +426,12 @@ headerbar windowcontrols > button {
 
 windowcontrols > button > image,
 windowcontrols button image {
+  background-color: transparent !important;
+  background-image: none !important;
+  border-radius: 0 !important;
+  padding: 0 !important;
+  margin: 0 !important;
+  box-shadow: none !important;
   -gtk-icon-size: ${BTN_ICO}px !important;
   min-width: ${BTN_ICO}px !important;
   min-height: ${BTN_ICO}px !important;
@@ -430,9 +444,21 @@ windowcontrols button:hover {
   border-radius: 0 !important;
 }
 
+windowcontrols > button:hover > image,
+windowcontrols button:hover image {
+  background-color: transparent !important;
+  border-radius: 0 !important;
+}
+
 windowcontrols > button:active,
 windowcontrols button:active {
   background-color: alpha(currentColor, 0.24) !important;
+  border-radius: 0 !important;
+}
+
+windowcontrols > button:active > image,
+windowcontrols button:active image {
+  background-color: transparent !important;
   border-radius: 0 !important;
 }
 
@@ -440,6 +466,13 @@ windowcontrols > button.close:hover,
 windowcontrols button.close:hover {
   background-color: #e81123 !important;
   background-image: none !important;
+  color: #ffffff !important;
+  border-radius: 0 !important;
+}
+
+windowcontrols > button.close:hover > image,
+windowcontrols button.close:hover image {
+  background-color: transparent !important;
   color: #ffffff !important;
   border-radius: 0 !important;
 }
