@@ -122,7 +122,16 @@ confirm() {
     if [ "$ASSUME_YES" = "1" ]; then
         return 0
     fi
+    # Без терминала спрашивать некого: под systemd, в конвейере или когда
+    # вывод перенаправлен, приглашение уходит в никуда, а read ждёт вечно.
+    # Один такой вопрос уже подвесил самопроверку у человека.
+    if [ ! -t 0 ]; then
+        note "вопрос «$1» задать некому — ввода нет, считаю ответ отрицательным"
+        note "чтобы согласиться заранее, добавь --yes"
+        return 1
+    fi
     printf '    %s [y/N] ' "$1"
+    local answer
     read -r answer
     if [ "$answer" = "y" ]; then
         return 0
@@ -654,10 +663,14 @@ cmd_buttons() {
     # за те же селекторы — снимаем их до записи.
     if has_legacy_css; then
         note "в gtk.css найдены правила старого look.sh"
-        if confirm "убрать их? (иначе два набора правил будут спорить)"; then
-            strip_legacy_css
+        if [ "$DRY_RUN" = "1" ]; then
+            note "(проверка) спросил бы, убирать ли их"
         else
-            note "оставляю; учти, что вид может получиться смешанным"
+            if confirm "убрать их? (иначе два набора правил будут спорить)"; then
+                strip_legacy_css
+            else
+                note "оставляю; учти, что вид может получиться смешанным"
+            fi
         fi
     fi
 
@@ -4714,7 +4727,7 @@ sandbox_run() {
         DK_SYS_ICONS="$SB/sys/icons" \
         DK_SYS_APPS="$SB/sys/applications" \
         DBUS_SESSION_BUS_ADDRESS="disabled:" \
-        bash "$SELF" --yes "$@" > "$SB_OUT" 2>&1
+        bash "$SELF" --yes "$@" > "$SB_OUT" 2>&1 < /dev/null
     SB_RC=$?
     return 0
 }
@@ -5023,7 +5036,7 @@ cmd_selftest() {
     if [ -f "$CSS3" ]; then
         before_sum=$(md5sum "$CSS3" | cut -d' ' -f1)
     fi
-    bash "$SELF" --dry-run buttons >/dev/null 2>&1
+    bash "$SELF" --dry-run buttons >/dev/null 2>&1 < /dev/null
     local after_sum=""
     if [ -f "$CSS3" ]; then
         after_sum=$(md5sum "$CSS3" | cut -d' ' -f1)
@@ -5425,11 +5438,35 @@ st_core() {
         *) t_fail "HOME=/ не отвергнут"; t_detail "вывод: $(printf '%s' "$guard_out" | head -2)" ;;
     esac
 
+    # Вопрос, заданный без терминала, однажды подвесил прогон намертво:
+    # приглашение ушло в /dev/null, а read ждал ответа.
+    printf '/* look-begin */
+button { min-width: 46px; }
+/* look-end */
+'         > "$SB/.config/gtk-3.0/gtk.css"
+    local hang_rc=0
+    timeout 30 env -i HOME="$SB" USER="${USER:-tester}"         PATH="$SB_BIN:/usr/local/bin:/usr/bin:/bin" LANG="${LANG:-C.UTF-8}"         DK_STUB_STORE="$SB_STORE" DK_SYS_THEMES="$SB/sys/themes"         DK_SYS_ICONS="$SB/sys/icons" DK_SYS_APPS="$SB/sys/applications"         bash "$SELF" buttons --glyphs keep > "$SB_OUT" 2>&1 < /dev/null
+    hang_rc=$?
+    if [ "$hang_rc" = "124" ]; then
+        t_fail "команда зависла на вопросе без терминала"
+        t_detail "так прогон и вставал: приглашение не видно, ввода нет"
+    else
+        t_ok "вопрос без терминала не подвешивает команду"
+    fi
+    t_out_has "сказано, что спросить некого" "задать некому"
+    # вернуть чистый файл, иначе следующая проверка увидит наши правила
+    printf '/* чужое правило */
+window { color: red; }
+' > "$SB/.config/gtk-3.0/gtk.css"
+
     # лог обязан вестись
     t_file "лог пишется" "$SB/.local/state/desktop-kit/desktop-kit.log"
     t_has "в логе видны запуски" "$SB/.local/state/desktop-kit/desktop-kit.log" "запуск:"
 
-    # --quiet глушит обычный вывод, но не ошибки
+    # --quiet глушит обычный вывод, но не ошибки. Предыдущая проверка
+    # оставила в gtk.css блок предшественника, а про него status обязан
+    # ругаться даже в тихом режиме — сначала возвращаем чистый файл.
+    printf '/* чужое правило */\nwindow { color: red; }\n' > "$SB/.config/gtk-3.0/gtk.css"
     sandbox_run --quiet status
     if [ -s "$SB_OUT" ]; then
         t_fail "--quiet: status всё равно печатает"
@@ -5437,6 +5474,12 @@ st_core() {
     else
         t_ok "--quiet: обычный вывод подавлен"
     fi
+
+    # А вот ошибку тихий режим глушить не имеет права
+    printf '/* look-begin */\nbutton { min-width: 1px; }\n/* look-end */\n' \
+        >> "$SB/.config/gtk-3.0/gtk.css"
+    sandbox_run --quiet status
+    t_out_has "--quiet не скрывает предупреждения" "look.sh"
 
     sandbox_drop
 }
