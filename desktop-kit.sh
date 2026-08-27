@@ -1,0 +1,3012 @@
+#!/usr/bin/env bash
+#
+#  desktop-kit — единый инструмент настройки десктопа Ubuntu 24.04 / GNOME 46
+#
+#  Одна команда на каждую подсистему, единый откат, единый лог,
+#  самопроверка прямо на рабочей машине.
+#
+#  ./desktop-kit.sh <команда> [параметры]
+#  ./desktop-kit.sh help <команда>     подробности по одной команде
+#  ./desktop-kit.sh status             что сейчас применено
+#  ./desktop-kit.sh selftest           проверить себя и собрать архив с логами
+#  ./desktop-kit.sh revert [команда]   откатить всё или одну подсистему
+#
+#  ------------------------------------------------------------------------
+#  ЧТО ЗДЕСЬ УЧТЕНО (каждый пункт стоил отдельного круга отладки)
+#
+#  * GTK НЕ ПОНИМАЕТ !important — считает мусором и выбрасывает правило
+#    целиком: "Junk at end of value for min-width". Он и не нужен:
+#    ~/.config/gtk-*/gtk.css грузится с приоритетом USER, темы — с THEME.
+#  * libadwaita ИГНОРИРУЕТ темы (gtk-theme-name прибит к Adwaita-empty):
+#    на Nautilus и Настройки влияет только ~/.config/gtk-4.0/gtk.css.
+#  * Круг у кнопки заголовка рисует не кнопка, а её дочерний image.
+#    В GTK3 наоборот — сама кнопка. Цели разные.
+#  * -gtk-icon-size есть только в GTK4. В GTK3 значок растеризуется в 16px
+#    и растягивается трансформацией: выше ~1.3 видны пиксели.
+#  * ~/.config/gtk-4.0/gtk.css у тем с флагом -l это СИМЛИНК внутрь темы.
+#  * gnome-terminal-server переживает закрытие всех окон и держит старую
+#    тему, пока его не убить.
+#  * grep -vF "" выбрасывает ВСЕ строки: пустой фильтр опаснее отсутствия.
+#  * pywal дописывает в colors.sh ссылки на несуществующие переменные —
+#    под set -u подключение валит скрипт.
+#  * Скрипт не содержит || и && : юзер переносит команды через мессенджер,
+#    который их проглатывает.
+#  ------------------------------------------------------------------------
+
+set -uo pipefail
+
+VERSION="1.0"
+SELF=$(readlink -f "$0")
+
+# --------------------------------------------------------------- пути
+
+STATE_DIR="$HOME/.local/state/desktop-kit"
+BACKUP_DIR="$STATE_DIR/backups"
+LOG_FILE="$STATE_DIR/desktop-kit.log"
+BEFORE="$STATE_DIR/before.env"
+
+CSS3="$HOME/.config/gtk-3.0/gtk.css"
+CSS4="$HOME/.config/gtk-4.0/gtk.css"
+CONKY_DIR="$HOME/.config/conky"
+CONKY_CONF="$CONKY_DIR/main.conf"
+CONKY_LUA="$CONKY_DIR/desktop-kit-bg.lua"
+NEWTAB_DIR="$HOME/.local/share/newtab"
+NEWTAB_LINKS="$NEWTAB_DIR/links.txt"
+BIN_DIR="$HOME/bin"
+
+FLUENT_ICONS="https://raw.githubusercontent.com/vinceliuice/Fluent-icon-theme/master/src/symbolic/actions"
+WALLHAVEN="https://wallhaven.cc/api/v1/search"
+
+# --------------------------------------------------------------- вывод
+
+DRY_RUN=0
+ASSUME_YES=0
+QUIET=0
+
+ok()   { if [ "$QUIET" = "0" ]; then echo "  ✓ $*"; fi; log "OK   $*"; }
+bad()  { echo "  ✗ $*" >&2; log "FAIL $*"; }
+note() { if [ "$QUIET" = "0" ]; then echo "    $*"; fi; log "     $*"; }
+head1() { if [ "$QUIET" = "0" ]; then echo "==> $*"; fi; log "=== $*"; }
+
+log() {
+    mkdir -p "$STATE_DIR"
+    echo "$(date '+%Y-%m-%d %H:%M:%S') $*" >> "$LOG_FILE"
+}
+
+die() {
+    bad "$*"
+    exit 1
+}
+
+# спросить подтверждение; --yes пропускает
+confirm() {
+    if [ "$ASSUME_YES" = "1" ]; then
+        return 0
+    fi
+    printf '    %s [y/N] ' "$1"
+    read -r answer
+    if [ "$answer" = "y" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# в режиме проверки ничего не пишем, только рассказываем
+would() {
+    if [ "$DRY_RUN" = "1" ]; then
+        note "(проверка) $*"
+        return 0
+    fi
+    return 1
+}
+
+# --------------------------------------------------------- gsettings
+
+gi_get() { gsettings get org.gnome.desktop.interface "$1" 2>/dev/null | tr -d "'"; }
+gi_set() {
+    if would "gsettings interface $1 = $2"; then
+        return 0
+    fi
+    gsettings set org.gnome.desktop.interface "$1" "$2" 2>/dev/null
+}
+
+have() { command -v "$1" >/dev/null 2>&1; }
+
+# ------------------------------------------------------------ бэкапы
+
+# Копия делается ОДИН раз и только с файла, где ещё нет наших правок:
+# иначе повторный запуск сохранит уже изменённый файл, и откат вернёт его.
+backup_once() {
+    local src="$1"
+    local name="$2"
+    local dst="$BACKUP_DIR/$name"
+    mkdir -p "$BACKUP_DIR"
+    if [ -e "$dst" ]; then
+        return 0
+    fi
+    if [ -L "$dst" ]; then
+        return 0
+    fi
+    if [ -L "$src" ]; then
+        cp -P "$src" "$dst"
+        ok "сохранён симлинк: $name"
+        return 0
+    fi
+    if [ -f "$src" ]; then
+        if grep -q 'dk:' "$src"; then
+            return 0
+        fi
+        cp "$src" "$dst"
+        ok "сохранён исходный файл: $name"
+    fi
+    return 0
+}
+
+restore_backup() {
+    src="$1"
+    name="$2"
+    dst="$BACKUP_DIR/$name"
+    local found=0
+    if [ -e "$dst" ]; then found=1; fi
+    if [ -L "$dst" ]; then found=1; fi
+    if [ "$found" = "1" ]; then
+        rm -f "$src"
+        mv "$dst" "$src"
+        ok "восстановлен $src"
+        return 0
+    fi
+    return 1
+}
+
+# запомнить исходное значение настройки — только при первом изменении
+remember() {
+    local key="$1"
+    local value="$2"
+    mkdir -p "$STATE_DIR"
+    touch "$BEFORE"
+    if grep -q "^$key=" "$BEFORE"; then
+        return 0
+    fi
+    echo "$key='$value'" >> "$BEFORE"
+}
+
+recall() {
+    key="$1"
+    if [ ! -f "$BEFORE" ]; then
+        return 1
+    fi
+    local line=$(grep "^$key=" "$BEFORE" | tail -1)
+    if [ -z "$line" ]; then
+        return 1
+    fi
+    value="${line#*=}"
+    echo "$value" | sed "s/^'//; s/'$//"
+    return 0
+}
+
+# --------------------------------------------------------- css-блоки
+
+# Блоки помечаются по имени подсистемы: dk:buttons, dk:corners и т.д.
+# Так одна команда не затирает правки другой.
+css_strip() {
+    local tag="$1"
+    local file="$2"
+    if [ -f "$file" ]; then
+        sed -i "/dk:$tag-begin/,/dk:$tag-end/d" "$file"
+    fi
+}
+
+css_append() {
+    tag="$1"
+    file="$2"
+    local body="$3"
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+    css_strip "$tag" "$file"
+    printf '\n/* dk:%s-begin */\n%s\n/* dk:%s-end */\n' "$tag" "$body" "$tag" >> "$file"
+}
+
+css_has() {
+    grep -q "dk:$1-begin" "$2" 2>/dev/null
+}
+
+# GTK4-файл часто оказывается симлинком внутрь темы. Писать туда нельзя:
+# правки уедут в тему и пропадут при её переустановке.
+untangle_gtk4() {
+    if [ -L "$CSS4" ]; then
+        local target=$(readlink -f "$CSS4")
+        backup_once "$CSS4" "gtk-4.0-gtk.css"
+        rm -f "$CSS4"
+        touch "$CSS4"
+        note "симлинк на тему снят (тема лежала в $target)"
+        note "libadwaita темы всё равно не читает, потери вида нет"
+    fi
+    mkdir -p "$(dirname "$CSS4")"
+    touch "$CSS4"
+}
+
+# ------------------------------------------------------- перезапуски
+
+restart_gtk_apps() {
+    if have nautilus; then
+        if would "закрыть Nautilus"; then
+            :
+        else
+            nautilus -q >/dev/null 2>&1
+            ok "Nautilus закрыт — откроется с новым видом"
+        fi
+    fi
+    if pgrep -x gnome-terminal-server >/dev/null 2>&1; then
+        note "gnome-terminal-server работает: терминал держит старый вид"
+        note "закрыть (все вкладки закроются): pkill -x gnome-terminal-server"
+    fi
+}
+
+restart_conky() {
+    if ! have conky; then
+        return 0
+    fi
+    if would "перезапустить conky"; then
+        return 0
+    fi
+    pkill -x conky >/dev/null 2>&1
+    sleep 1
+    nohup conky -c "$CONKY_CONF" >/dev/null 2>&1 &
+    sleep 1
+    if pgrep -x conky >/dev/null 2>&1; then
+        ok "conky перезапущен"
+    else
+        bad "conky не поднялся — проверь: conky -c $CONKY_CONF"
+    fi
+}
+
+# ------------------------------------------------------------ проверки
+
+# shift N при нехватке аргументов НЕ сдвигает ничего и возвращает ошибку.
+# Без set -e разбор пошёл бы по кругу с тем же $1 — бесконечный цикл.
+# Поэтому сдвигаем ровно столько, сколько есть, и говорим об этом вслух.
+need_args() {
+    local flag="$1"
+    local want="$2"
+    local have_n="$3"
+    if [ "$have_n" -lt "$want" ]; then
+        die "$flag: нужно значений — $want, передано $have_n"
+    fi
+}
+
+is_number() {
+    echo "$1" | grep -qE '^[0-9]+$'
+}
+
+is_decimal() {
+    echo "$1" | grep -qE '^[0-9]+(\.[0-9]+)?$'
+}
+
+is_hex_colour() {
+    echo "$1" | grep -qE '^#[0-9a-fA-F]{6}$'
+}
+
+require_tools() {
+    local missing=""
+    for t in "$@"; do
+        if ! have "$t"; then
+            missing="$missing $t"
+        fi
+    done
+    if [ -n "$missing" ]; then
+        die "не хватает:$missing — sudo apt install -y$missing"
+    fi
+}
+
+# =====================================================================
+#  buttons — кнопки заголовка окна
+# =====================================================================
+
+help_buttons() {
+    cat <<'EOF'
+buttons — кнопки заголовка: размер, значки, подсветка
+
+  desktop-kit buttons [параметры]
+
+  --size W H            размер кнопки, по умолчанию 46 34
+  --icon N              размер значка в GTK4, по умолчанию 20
+  --gtk3-scale S        масштаб значка в GTK3, по умолчанию 1.0
+                        (выше 1.3 значок пикселит: GTK3 растягивает готовый растр)
+  --hover COLOR         подсветка при наведении, по умолчанию из цвета текста
+  --close COLOR         цвет кнопки закрытия, по умолчанию #e81123
+  --radius N            скругление подсветки, по умолчанию 0 (квадрат)
+  --glyphs fluent|keep  откуда брать значки, по умолчанию fluent
+
+  Значки Fluent ставятся темой-наследником: текущая тема иконок
+  наследуется целиком, подменяются ровно четыре значка. Папки и
+  приложения остаются прежними.
+
+  Не подействует на Chrome, Tabby, Telegram — это Electron, они рисуют
+  кнопки сами. И на Kate — она Qt, у неё свой движок тем.
+EOF
+}
+
+cmd_buttons() {
+    local btn_w=46
+    local btn_h=34
+    local btn_icon=20
+    local gtk3_scale="1.0"
+    local hover_colour=""
+    local close_colour="#e81123"
+    local radius=0
+    local glyphs="fluent"
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --size) need_args "--size" 3 "$#"; btn_w="$2"; btn_h="$3"; shift 3 ;;
+            --icon) need_args "--icon" 2 "$#"; btn_icon="${2:-20}"; shift 2 ;;
+            --gtk3-scale) need_args "--gtk3-scale" 2 "$#"; gtk3_scale="${2:-1.0}"; shift 2 ;;
+            --hover) need_args "--hover" 2 "$#"; hover_colour="${2:-}"; shift 2 ;;
+            --close) need_args "--close" 2 "$#"; close_colour="${2:-#e81123}"; shift 2 ;;
+            --radius) need_args "--radius" 2 "$#"; radius="${2:-0}"; shift 2 ;;
+            --glyphs) need_args "--glyphs" 2 "$#"; glyphs="${2:-fluent}"; shift 2 ;;
+            -h|--help)    help_buttons; return 0 ;;
+            *) die "buttons: неизвестный параметр $1" ;;
+        esac
+    done
+
+    for v in "$btn_w" "$btn_h" "$btn_icon" "$radius"; do
+        if ! is_number "$v"; then
+            die "buttons: размеры и радиус — целые числа"
+        fi
+    done
+    if ! is_decimal "$gtk3_scale"; then
+        die "buttons: масштаб — число, например 1.0 или 1.25"
+    fi
+    if [ -n "$hover_colour" ]; then
+        if ! is_hex_colour "$hover_colour"; then
+            die "buttons: цвет в виде #rrggbb"
+        fi
+    fi
+    if ! is_hex_colour "$close_colour"; then
+        die "buttons: цвет закрытия в виде #rrggbb"
+    fi
+
+    head1 "кнопки заголовка"
+
+    local hover_value="alpha(currentColor, 0.14)"
+    local active_value="alpha(currentColor, 0.24)"
+    if [ -n "$hover_colour" ]; then
+        hover_value="$hover_colour"
+        active_value="$hover_colour"
+    fi
+    local close_active=$(darken_hex "$close_colour")
+
+    if [ "$glyphs" = "fluent" ]; then
+        install_fluent_glyphs
+    fi
+
+    backup_once "$CSS3" "gtk-3.0-gtk.css"
+    untangle_gtk4
+    backup_once "$CSS4" "gtk-4.0-gtk.css"
+
+    if would "записать правила кнопок"; then
+        return 0
+    fi
+
+    css_append buttons "$CSS3" "$(cat <<EOF
+/* GTK3: круг рисует сама кнопка (%circular-button в темах).
+   -gtk-icon-size здесь не существует, размер значка — только масштабом. */
+headerbar button.titlebutton,
+.titlebar button.titlebutton,
+button.titlebutton {
+  min-width: ${btn_w}px;
+  min-height: ${btn_h}px;
+  padding: 0;
+  margin: 0;
+  background-image: none;
+  box-shadow: none;
+  border: none;
+  border-radius: ${radius}px;
+}
+
+headerbar button.titlebutton image,
+.titlebar button.titlebutton image,
+button.titlebutton image {
+  -gtk-icon-transform: scale(${gtk3_scale});
+  background-color: transparent;
+  background-image: none;
+  border-radius: 0;
+  padding: 0;
+  box-shadow: none;
+}
+
+headerbar button.titlebutton:hover,
+.titlebar button.titlebutton:hover,
+button.titlebutton:hover {
+  background-color: ${hover_value};
+  background-image: none;
+  border-radius: ${radius}px;
+}
+
+headerbar button.titlebutton:hover image,
+button.titlebutton:hover image {
+  background-color: transparent;
+  border-radius: 0;
+}
+
+headerbar button.titlebutton:active,
+button.titlebutton:active {
+  background-color: ${active_value};
+  border-radius: ${radius}px;
+}
+
+headerbar button.titlebutton.close:hover,
+.titlebar button.titlebutton.close:hover,
+button.titlebutton.close:hover {
+  background-color: ${close_colour};
+  background-image: none;
+  color: #ffffff;
+  border-radius: ${radius}px;
+}
+
+headerbar button.titlebutton.close:hover image,
+button.titlebutton.close:hover image {
+  background-color: transparent;
+  color: #ffffff;
+}
+
+headerbar button.titlebutton.close:active,
+button.titlebutton.close:active {
+  background-color: ${close_active};
+  color: #ffffff;
+  border-radius: ${radius}px;
+}
+EOF
+)"
+
+    css_append buttons "$CSS4" "$(cat <<EOF
+/* GTK4/libadwaita: фон и круг рисует ДОЧЕРНИЙ image, а не кнопка.
+   Сама кнопка всегда background: none, поэтому чистим image. */
+windowcontrols > button,
+headerbar windowcontrols > button {
+  min-width: ${btn_w}px;
+  min-height: ${btn_h}px;
+  padding: 0;
+  margin: 0;
+  background-image: none;
+  box-shadow: none;
+  border: none;
+  border-radius: ${radius}px;
+}
+
+windowcontrols > button > image {
+  background-color: transparent;
+  background-image: none;
+  border-radius: 0;
+  padding: 0;
+  margin: 0;
+  box-shadow: none;
+  -gtk-icon-size: ${btn_icon}px;
+}
+
+windowcontrols > button:hover {
+  background-color: ${hover_value};
+  background-image: none;
+  border-radius: ${radius}px;
+}
+
+windowcontrols > button:hover > image {
+  background-color: transparent;
+  border-radius: 0;
+}
+
+windowcontrols > button:active {
+  background-color: ${active_value};
+  border-radius: ${radius}px;
+}
+
+windowcontrols > button:active > image {
+  background-color: transparent;
+  border-radius: 0;
+}
+
+windowcontrols > button.close:hover {
+  background-color: ${close_colour};
+  background-image: none;
+  border-radius: ${radius}px;
+}
+
+windowcontrols > button.close:hover > image {
+  background-color: transparent;
+  color: #ffffff;
+  border-radius: 0;
+}
+
+windowcontrols > button.close:active {
+  background-color: ${close_active};
+  border-radius: ${radius}px;
+}
+
+windowcontrols > button.close:active > image {
+  background-color: transparent;
+  color: #ffffff;
+}
+EOF
+)"
+
+    ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} (GTK4), масштаб ${gtk3_scale} (GTK3)"
+    ok "подсветка: радиус ${radius}px, закрытие ${close_colour}"
+    restart_gtk_apps
+}
+
+# затемнить цвет для состояния нажатия
+darken_hex() {
+    local hex="${1#\#}"
+    local r=$((16#${hex:0:2}))
+    local g=$((16#${hex:2:2}))
+    local b=$((16#${hex:4:2}))
+    r=$((r * 78 / 100))
+    g=$((g * 78 / 100))
+    b=$((b * 78 / 100))
+    printf '#%02x%02x%02x' "$r" "$g" "$b"
+}
+
+# Papirus не содержит window-*-symbolic — GNOME подставляет Adwaita.
+# Поэтому значки кладём в тему-наследник поверх текущей.
+install_fluent_glyphs() {
+    local cur=$(gi_get icon-theme)
+    local base="$cur"
+    case "$cur" in *-dk-glyphs) base="${cur%-dk-glyphs}" ;; esac
+    if [ -z "$base" ]; then
+        base="Adwaita"
+    fi
+    local theme="$base-dk-glyphs"
+    local dir="$HOME/.local/share/icons/$theme"
+
+    src=""
+    for d in "$HOME/.local/share/icons/$base" "$HOME/.icons/$base" "/usr/share/icons/$base"; do
+        if [ -d "$d" ]; then
+            src="$d"
+        fi
+    done
+    if [ -z "$src" ]; then
+        bad "тема иконок $base не найдена — значки оставляю прежними"
+        return 1
+    fi
+
+    if would "поставить значки Fluent поверх $base"; then
+        return 0
+    fi
+
+    require_tools curl
+    rm -rf "$dir"
+    mkdir -p "$dir/symbolic/actions"
+    local got=0
+    for n in close maximize minimize restore; do
+        local f="$dir/symbolic/actions/window-$n-symbolic.svg"
+        local code=$(curl -sf -L --max-time 30 -o "$f" -w '%{http_code}' \
+               "$FLUENT_ICONS/window-$n-symbolic.svg" 2>/dev/null)
+        if [ "$code" = "200" ]; then
+            if head -c 200 "$f" 2>/dev/null | grep -q '<svg'; then
+                got=$((got + 1))
+            else
+                rm -f "$f"
+            fi
+        else
+            rm -f "$f"
+        fi
+    done
+
+    if [ "$got" -ne 4 ]; then
+        bad "скачалось значков $got из 4 — оставляю прежние"
+        rm -rf "$dir"
+        return 1
+    fi
+
+    cat > "$dir/index.theme" <<EOF
+[Icon Theme]
+Name=$theme
+Comment=$base со значками заголовка из Fluent
+Inherits=$base,Adwaita,hicolor
+Directories=symbolic/actions
+
+[symbolic/actions]
+Size=16
+MinSize=8
+MaxSize=512
+Context=Actions
+Type=Scalable
+EOF
+    if have gtk-update-icon-cache; then
+        gtk-update-icon-cache -f "$dir" >/dev/null 2>&1
+    fi
+    remember ICON_THEME "$cur"
+    gi_set icon-theme "$theme"
+    ok "значки Fluent поверх $base"
+    return 0
+}
+
+# =====================================================================
+#  corners — скругление окон
+# =====================================================================
+
+help_corners() {
+    cat <<'EOF'
+corners — скругление углов окон, меню и подсказок
+
+  desktop-kit corners [--radius N]
+
+  --radius N    радиус в пикселях, по умолчанию 0 (строго прямые углы)
+
+  Мутер скругление окон не настраивает — форму задаёт только тема,
+  поэтому правится через css. В bspwm то же самое делает picom своим
+  corner-radius, но в GNOME такого рычага нет.
+EOF
+}
+
+cmd_corners() {
+    radius=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --radius) need_args "--radius" 2 "$#"; radius="${2:-0}"; shift 2 ;;
+            -h|--help) help_corners; return 0 ;;
+            *) die "corners: неизвестный параметр $1" ;;
+        esac
+    done
+    if ! is_number "$radius"; then
+        die "corners: радиус — целое число"
+    fi
+
+    head1 "углы окон (радиус ${radius}px)"
+    backup_once "$CSS3" "gtk-3.0-gtk.css"
+    untangle_gtk4
+    backup_once "$CSS4" "gtk-4.0-gtk.css"
+
+    if would "записать правила углов"; then
+        return 0
+    fi
+
+    css_append corners "$CSS3" "$(cat <<EOF
+decoration,
+decoration:backdrop,
+window.csd,
+window.background,
+.titlebar,
+headerbar,
+menu,
+.menu,
+.context-menu,
+popover.background,
+tooltip,
+tooltip.background {
+  border-radius: ${radius}px;
+}
+EOF
+)"
+
+    css_append corners "$CSS4" "$(cat <<EOF
+window,
+window.csd,
+window.background,
+headerbar,
+.titlebar,
+popover > contents,
+tooltip,
+.card,
+.toolbar {
+  border-radius: ${radius}px;
+}
+EOF
+)"
+
+    ok "радиус окон, меню и подсказок: ${radius}px"
+    restart_gtk_apps
+}
+
+# =====================================================================
+#  theme — тема GTK
+# =====================================================================
+
+help_theme() {
+    cat <<'EOF'
+theme — тема оформления окон
+
+  desktop-kit theme               показать текущую и доступные
+  desktop-kit theme ИМЯ           применить тему
+  desktop-kit theme --list        только список доступных
+  desktop-kit theme --install ИМЯ собрать и поставить известную тему
+  desktop-kit theme --dark        тёмная цветовая схема
+  desktop-kit theme --light       светлая цветовая схема
+
+  Если названной темы нет, скрипт предложит собрать её из исходников —
+  для известных ему тем (Graphite, Orchis, Colloid, Fluent, WhiteSur,
+  Qogir, Jasper).
+
+  Тема и цветовая схема меняются ВМЕСТЕ. Рассинхрон однажды уже дал
+  нечитаемый вид: тёмная тема при светлой схеме — половина окон серая.
+
+  На GTK4-приложения (Nautilus, Настройки) тема НЕ влияет: libadwaita
+  её игнорирует. Их вид задаётся цветовой схемой и правилами из
+  ~/.config/gtk-4.0/gtk.css.
+EOF
+}
+
+theme_repo_for() {
+    case "$1" in
+        Graphite*) echo "https://github.com/vinceliuice/Graphite-gtk-theme.git" ;;
+        Orchis*)   echo "https://github.com/vinceliuice/Orchis-theme.git" ;;
+        Colloid*)  echo "https://github.com/vinceliuice/Colloid-gtk-theme.git" ;;
+        Fluent*)   echo "https://github.com/vinceliuice/Fluent-gtk-theme.git" ;;
+        WhiteSur*) echo "https://github.com/vinceliuice/WhiteSur-gtk-theme.git" ;;
+        Qogir*)    echo "https://github.com/vinceliuice/Qogir-theme.git" ;;
+        Jasper*)   echo "https://github.com/vinceliuice/Jasper-gtk-theme.git" ;;
+        *) echo "" ;;
+    esac
+}
+
+list_themes() {
+    for d in "$HOME/.themes" "$HOME/.local/share/themes" "/usr/share/themes"; do
+        if [ -d "$d" ]; then
+            for t in "$d"/*; do
+                if [ -d "$t/gtk-3.0" ]; then
+                    basename "$t"
+                fi
+            done
+        fi
+    done | sort -u
+}
+
+theme_exists() {
+    list_themes | grep -qx "$1"
+}
+
+cmd_theme() {
+    local wanted=""
+    local scheme=""
+    local do_install=""
+    local only_list=0
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --list)    only_list=1; shift ;;
+            --install) need_args "--install" 2 "$#"; do_install="${2:-}"; shift 2 ;;
+            --dark)    scheme="prefer-dark"; shift ;;
+            --light)   scheme="prefer-light"; shift ;;
+            -h|--help) help_theme; return 0 ;;
+            -*) die "theme: неизвестный параметр $1" ;;
+            *) wanted="$1"; shift ;;
+        esac
+    done
+
+    if [ "$only_list" = "1" ]; then
+        head1 "доступные темы"
+        list_themes | sed 's/^/    /'
+        return 0
+    fi
+
+    if [ -n "$do_install" ]; then
+        install_theme "$do_install"
+        wanted="$do_install"
+    fi
+
+    if [ -z "$wanted" ]; then
+        if [ -z "$scheme" ]; then
+            head1 "тема окон"
+            note "сейчас: $(gi_get gtk-theme), схема $(gi_get color-scheme)"
+            note "доступные:"
+            list_themes | sed 's/^/      /'
+            note "применить: $0 theme ИМЯ"
+            return 0
+        fi
+    fi
+
+    if [ -n "$wanted" ]; then
+        if ! theme_exists "$wanted"; then
+            bad "темы '$wanted' в системе нет"
+            local repo=$(theme_repo_for "$wanted")
+            if [ -n "$repo" ]; then
+                note "её можно собрать из исходников:"
+                note "  $0 theme --install $wanted"
+            else
+                note "доступные темы:"
+                list_themes | sed 's/^/      /'
+            fi
+            return 1
+        fi
+
+        head1 "тема окон"
+        remember GTK_THEME "$(gi_get gtk-theme)"
+        remember SHELL_THEME "$(dconf read /org/gnome/shell/extensions/user-theme/name 2>/dev/null | tr -d "'")"
+        gi_set gtk-theme "$wanted"
+        ok "тема: $wanted"
+
+        # тема оболочки — только если такая существует
+        if [ -d "$HOME/.themes/$wanted/gnome-shell" ]; then
+            if would "тема оболочки $wanted"; then
+                :
+            else
+                dconf write /org/gnome/shell/extensions/user-theme/name "'$wanted'" 2>/dev/null
+                ok "тема оболочки: $wanted"
+            fi
+        fi
+
+        # схему выводим из имени, если явно не задана
+        if [ -z "$scheme" ]; then
+            case "$wanted" in
+                *-Light|*-light) scheme="prefer-light" ;;
+                *-Dark|*-dark)   scheme="prefer-dark" ;;
+            esac
+        fi
+    fi
+
+    if [ -n "$scheme" ]; then
+        remember COLOR_SCHEME "$(gi_get color-scheme)"
+        gi_set color-scheme "$scheme"
+        ok "цветовая схема: $scheme"
+    fi
+
+    restart_gtk_apps
+}
+
+install_theme() {
+    name="$1"
+    repo=$(theme_repo_for "$name")
+    if [ -z "$repo" ]; then
+        die "не знаю, откуда брать тему '$name'"
+    fi
+    require_tools git sassc
+
+    local variant="dark"
+    case "$name" in
+        *-Light|*-light) variant="light" ;;
+    esac
+
+    head1 "сборка темы $name"
+    if would "склонировать $repo и собрать вариант $variant"; then
+        return 0
+    fi
+
+    src="$HOME/.cache/desktop-kit/themes/$(basename "$repo" .git)"
+    mkdir -p "$(dirname "$src")"
+    if [ ! -d "$src/.git" ]; then
+        rm -rf "$src"
+        git clone --depth 1 "$repo" "$src" >>"$LOG_FILE" 2>&1
+    fi
+    if [ ! -x "$src/install.sh" ]; then
+        die "в репозитории нет install.sh — смотри $LOG_FILE"
+    fi
+
+    ( cd "$src"; ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
+
+    if theme_exists "$name"; then
+        ok "тема собрана: $name"
+    else
+        bad "тема не появилась в ~/.themes"
+        note "что собралось:"
+        list_themes | grep -i "$(echo "$name" | cut -d- -f1)" | sed 's/^/      /'
+        note "подробности сборки: $LOG_FILE"
+        return 1
+    fi
+}
+
+# =====================================================================
+#  icons — тема значков и цвет папок
+# =====================================================================
+
+help_icons() {
+    cat <<'EOF'
+icons — тема значков и цвет папок
+
+  desktop-kit icons                показать текущую и доступные
+  desktop-kit icons ИМЯ            применить тему значков
+  desktop-kit icons --folders ЦВЕТ перекрасить папки Papirus
+  desktop-kit icons --list         список доступных
+
+  Цвета папок: adwaita black blue bluegrey breeze brown cyan green grey
+  indigo magenta nordic orange pink red teal violet white yaru yellow
+
+  Перекраска работает через papirus-folders и меняет саму тему Papirus,
+  поэтому наследники её подхватывают автоматически.
+EOF
+}
+
+list_icon_themes() {
+    for d in "$HOME/.local/share/icons" "$HOME/.icons" "/usr/share/icons"; do
+        if [ -d "$d" ]; then
+            for t in "$d"/*; do
+                if [ -f "$t/index.theme" ]; then
+                    basename "$t"
+                fi
+            done
+        fi
+    done | sort -u
+}
+
+cmd_icons() {
+    wanted=""
+    local folders=""
+    only_list=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --folders) need_args "--folders" 2 "$#"; folders="${2:-}"; shift 2 ;;
+            --list)    only_list=1; shift ;;
+            -h|--help) help_icons; return 0 ;;
+            -*) die "icons: неизвестный параметр $1" ;;
+            *) wanted="$1"; shift ;;
+        esac
+    done
+
+    if [ "$only_list" = "1" ]; then
+        head1 "доступные темы значков"
+        list_icon_themes | sed 's/^/    /'
+        return 0
+    fi
+
+    if [ -n "$folders" ]; then
+        head1 "цвет папок"
+        if ! have papirus-folders; then
+            bad "papirus-folders не установлен"
+            note "sudo apt install papirus-folders"
+            return 1
+        fi
+        base=$(gi_get icon-theme)
+        case "$base" in *-dk-glyphs) base="${base%-dk-glyphs}" ;; esac
+        if would "перекрасить папки $base в $folders"; then
+            return 0
+        fi
+        local out=$(papirus-folders -C "$folders" --theme "$base" 2>&1)
+        code=$?
+        if [ "$code" = "0" ]; then
+            ok "папки перекрашены в $folders"
+        else
+            bad "не вышло, возможно нужен sudo:"
+            note "sudo papirus-folders -C $folders --theme $base"
+            note "$out"
+        fi
+    fi
+
+    if [ -n "$wanted" ]; then
+        if ! list_icon_themes | grep -qx "$wanted"; then
+            bad "темы значков '$wanted' нет"
+            note "доступные:"
+            list_icon_themes | sed 's/^/      /'
+            return 1
+        fi
+        head1 "тема значков"
+        remember ICON_THEME "$(gi_get icon-theme)"
+        gi_set icon-theme "$wanted"
+        ok "тема значков: $wanted"
+        note "если нужны свои значки заголовка — $0 buttons"
+    fi
+
+    if [ -z "$wanted" ]; then
+        if [ -z "$folders" ]; then
+            head1 "значки"
+            note "сейчас: $(gi_get icon-theme)"
+            note "доступные:"
+            list_icon_themes | sed 's/^/      /'
+        fi
+    fi
+}
+
+# =====================================================================
+#  font — шрифт интерфейса
+# =====================================================================
+
+help_font() {
+    cat <<'EOF'
+font — шрифт интерфейса
+
+  desktop-kit font                 показать текущий
+  desktop-kit font "Имя Размер"    применить, например "Cantarell 11"
+  desktop-kit font --list          семейства, установленные в системе
+  desktop-kit font --mono "Имя Размер"   моноширинный (терминал, редакторы)
+
+  Имя проверяется по fc-list: несуществующий шрифт не применяется.
+EOF
+}
+
+cmd_font() {
+    wanted=""
+    local mono=""
+    only_list=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --list)    only_list=1; shift ;;
+            --mono) need_args "--mono" 2 "$#"; mono="${2:-}"; shift 2 ;;
+            -h|--help) help_font; return 0 ;;
+            -*) die "font: неизвестный параметр $1" ;;
+            *) wanted="$1"; shift ;;
+        esac
+    done
+
+    if [ "$only_list" = "1" ]; then
+        head1 "семейства шрифтов"
+        fc-list --format='%{family[0]}\n' 2>/dev/null | sort -u | sed 's/^/    /'
+        return 0
+    fi
+
+    if [ -z "$wanted" ]; then
+        if [ -z "$mono" ]; then
+            head1 "шрифты"
+            note "интерфейс:    $(gi_get font-name)"
+            note "моноширинный: $(gi_get monospace-font-name)"
+            note "документы:    $(gi_get document-font-name)"
+            return 0
+        fi
+    fi
+
+    apply_font() {
+        key="$1"
+        value="$2"
+        local family=$(echo "$value" | sed 's/ [0-9]*$//')
+        if ! fc-list 2>/dev/null | grep -qi "$family"; then
+            bad "шрифта '$family' в системе нет"
+            note "посмотреть доступные: $0 font --list"
+            return 1
+        fi
+        remember "$(echo "$key" | tr 'a-z-' 'A-Z_')" "$(gi_get "$key")"
+        gi_set "$key" "$value"
+        ok "$key: $value"
+        return 0
+    }
+
+    head1 "шрифт интерфейса"
+    if [ -n "$wanted" ]; then
+        apply_font font-name "$wanted"
+    fi
+    if [ -n "$mono" ]; then
+        apply_font monospace-font-name "$mono"
+    fi
+}
+
+# =====================================================================
+#  widget — виджет conky
+# =====================================================================
+
+help_widget() {
+    cat <<'EOF'
+widget — виджет conky на рабочем столе
+
+  desktop-kit widget [параметры]
+
+  --radius N     скругление углов, по умолчанию 12
+  --opacity N    плотность подложки 0..255, по умолчанию берётся из конфига
+  --color HEX    цвет подложки, по умолчанию из конфига
+  --square       без скругления (то же, что --radius 0)
+
+  У conky нет своего border-radius ни в одной версии, поэтому подложку
+  рисует Lua через Cairo, а собственное окно conky делается прозрачным.
+  Исходный конфиг сохраняется перед первой правкой.
+EOF
+}
+
+cmd_widget() {
+    radius=12
+    local opacity=""
+    local colour=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --radius) need_args "--radius" 2 "$#"; radius="${2:-12}"; shift 2 ;;
+            --opacity) need_args "--opacity" 2 "$#"; opacity="${2:-}"; shift 2 ;;
+            --color) need_args "--color" 2 "$#"; colour="${2:-}"; shift 2 ;;
+            --square)  radius=0; shift ;;
+            -h|--help) help_widget; return 0 ;;
+            *) die "widget: неизвестный параметр $1" ;;
+        esac
+    done
+
+    if ! is_number "$radius"; then
+        die "widget: радиус — целое число"
+    fi
+    if [ ! -f "$CONKY_CONF" ]; then
+        die "конфига conky нет: $CONKY_CONF"
+    fi
+
+    head1 "виджет conky (радиус ${radius}px)"
+
+    if [ -z "$colour" ]; then
+        colour=$(grep -oP "own_window_colour\s*=\s*'\K[0-9a-fA-F]{6}" "$CONKY_CONF" | head -1)
+    fi
+    colour="${colour#\#}"
+    if [ -z "$colour" ]; then
+        colour="1e1e2e"
+    fi
+
+    if [ -z "$opacity" ]; then
+        opacity=$(grep -oP "own_window_argb_value\s*=\s*\K[0-9]+" "$CONKY_CONF" | head -1)
+    fi
+    if [ -z "$opacity" ]; then
+        opacity=225
+    fi
+    # ноль означает, что мы уже применяли: берём прежнюю плотность
+    if [ "$opacity" = "0" ]; then
+        local saved=$(recall CONKY_ALPHA)
+        if [ -n "$saved" ]; then
+            opacity="$saved"
+        else
+            opacity=225
+        fi
+    fi
+    remember CONKY_ALPHA "$opacity"
+
+    r=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:0:2}))/255}")
+    g=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:2:2}))/255}")
+    b=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:4:2}))/255}")
+    local a=$(awk "BEGIN{printf \"%.3f\", $opacity/255}")
+
+    if would "нарисовать подложку радиусом $radius, цвет #$colour, плотность $opacity"; then
+        return 0
+    fi
+
+    backup_once "$CONKY_CONF" "conky-main.conf"
+
+    cat > "$CONKY_LUA" <<LUAEOF
+-- Подложка виджета: своего border-radius у conky нет ни в одной версии,
+-- поэтому рисуем сами, а окно conky делаем прозрачным.
+require 'cairo'
+
+local RADIUS = $radius
+local R, G, B, A = $r, $g, $b, $a
+
+function conky_draw_bg()
+    if conky_window == nil then
+        return
+    end
+
+    local w = conky_window.width
+    local h = conky_window.height
+    local rr = RADIUS
+    if rr * 2 > w then rr = w / 2 end
+    if rr * 2 > h then rr = h / 2 end
+
+    local surface = cairo_xlib_surface_create(conky_window.display,
+        conky_window.drawable, conky_window.visual, w, h)
+    local cr = cairo_create(surface)
+
+    cairo_new_path(cr)
+    cairo_move_to(cr, rr, 0)
+    cairo_line_to(cr, w - rr, 0)
+    cairo_arc(cr, w - rr, rr, rr, -math.pi / 2, 0)
+    cairo_line_to(cr, w, h - rr)
+    cairo_arc(cr, w - rr, h - rr, rr, 0, math.pi / 2)
+    cairo_line_to(cr, rr, h)
+    cairo_arc(cr, rr, h - rr, rr, math.pi / 2, math.pi)
+    cairo_line_to(cr, 0, rr)
+    cairo_arc(cr, rr, rr, rr, math.pi, 3 * math.pi / 2)
+    cairo_close_path(cr)
+
+    cairo_set_source_rgba(cr, R, G, B, A)
+    cairo_fill(cr)
+
+    cairo_destroy(cr)
+    cairo_surface_destroy(surface)
+end
+LUAEOF
+
+    sed -i "s|own_window_argb_value = [0-9]*|own_window_argb_value = 0|" "$CONKY_CONF"
+    if grep -q 'lua_load' "$CONKY_CONF"; then
+        sed -i "s|lua_load = '[^']*'|lua_load = '$CONKY_LUA'|" "$CONKY_CONF"
+    else
+        sed -i "0,/conky.config = {/s|conky.config = {|conky.config = {\n    lua_load = '$CONKY_LUA',|" "$CONKY_CONF"
+    fi
+    if ! grep -q 'lua_draw_hook_pre' "$CONKY_CONF"; then
+        sed -i "s|lua_load = '$CONKY_LUA',|lua_load = '$CONKY_LUA',\n    lua_draw_hook_pre = 'draw_bg',|" "$CONKY_CONF"
+    fi
+
+    ok "подложка: радиус ${radius}px, цвет #${colour}, плотность ${opacity}"
+    restart_conky
+}
+
+# =====================================================================
+#  terminal — GNOME Terminal
+# =====================================================================
+
+help_terminal() {
+    cat <<'EOF'
+terminal — GNOME Terminal: прозрачность, шрифт, палитра
+
+  desktop-kit terminal [параметры]
+
+  --opacity N    прозрачность фона 0..100, где 0 — непрозрачный
+  --font "Имя Размер"
+  --palette wal  взять цвета из текущей палитры pywal
+  --show         показать текущие настройки
+
+  ВАЖНО: gnome-terminal-server переживает закрытие всех окон и держит
+  старые настройки. После правки: pkill -x gnome-terminal-server
+
+  Tabby настраивается не здесь — у него свой конфиг, см. modules/tabby.md
+EOF
+}
+
+term_profile() {
+    local id=$(gsettings get org.gnome.Terminal.ProfilesList default 2>/dev/null | tr -d "'")
+    if [ -z "$id" ]; then
+        echo ""
+        return 1
+    fi
+    echo "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:$id/"
+}
+
+cmd_terminal() {
+    opacity=""
+    local font=""
+    local palette=""
+    local show=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --opacity) need_args "--opacity" 2 "$#"; opacity="${2:-}"; shift 2 ;;
+            --font) need_args "--font" 2 "$#"; font="${2:-}"; shift 2 ;;
+            --palette) need_args "--palette" 2 "$#"; palette="${2:-}"; shift 2 ;;
+            --show)    show=1; shift ;;
+            -h|--help) help_terminal; return 0 ;;
+            *) die "terminal: неизвестный параметр $1" ;;
+        esac
+    done
+
+    local prof=$(term_profile)
+    if [ -z "$prof" ]; then
+        die "не нашёл профиль GNOME Terminal"
+    fi
+
+    if [ "$show" = "1" ]; then
+        head1 "GNOME Terminal"
+        note "прозрачность:  $(gsettings get "$prof" background-transparency-percent 2>/dev/null)"
+        note "своя палитра:  $(gsettings get "$prof" use-theme-colors 2>/dev/null)"
+        note "шрифт:         $(gsettings get "$prof" font 2>/dev/null)"
+        return 0
+    fi
+
+    head1 "GNOME Terminal"
+
+    if [ -n "$opacity" ]; then
+        if ! is_number "$opacity"; then
+            die "terminal: прозрачность — целое число 0..100"
+        fi
+        if [ "$opacity" -gt 100 ]; then
+            die "terminal: прозрачность не больше 100"
+        fi
+        if would "прозрачность $opacity%"; then
+            :
+        else
+            gsettings set "$prof" use-transparent-background true 2>/dev/null
+            gsettings set "$prof" background-transparency-percent "$opacity" 2>/dev/null
+            ok "прозрачность: ${opacity}%"
+        fi
+    fi
+
+    if [ -n "$font" ]; then
+        family=$(echo "$font" | sed 's/ [0-9]*$//')
+        if ! fc-list 2>/dev/null | grep -qi "$family"; then
+            bad "шрифта '$family' нет"
+        else
+            if would "шрифт терминала $font"; then
+                :
+            else
+                gsettings set "$prof" use-system-font false 2>/dev/null
+                gsettings set "$prof" font "$font" 2>/dev/null
+                ok "шрифт: $font"
+            fi
+        fi
+    fi
+
+    if [ "$palette" = "wal" ]; then
+        apply_wal_palette "$prof"
+    fi
+
+    if pgrep -x gnome-terminal-server >/dev/null 2>&1; then
+        note "перезапусти сервер, иначе изменений не увидишь:"
+        note "  pkill -x gnome-terminal-server"
+    fi
+}
+
+# pywal дописывает в colors.sh строки со ссылками на несуществующие
+# переменные — под set -u подключение валит скрипт целиком.
+apply_wal_palette() {
+    prof="$1"
+    local colors="$HOME/.cache/wal/colors.sh"
+    if [ ! -f "$colors" ]; then
+        bad "палитры pywal нет: $colors"
+        return 1
+    fi
+    if would "применить палитру pywal к терминалу"; then
+        return 0
+    fi
+    set +u
+    . "$colors"
+    set -u
+    local pal="['$color0', '$color1', '$color2', '$color3', '$color4', '$color5', '$color6', '$color7', '$color8', '$color9', '$color10', '$color11', '$color12', '$color13', '$color14', '$color15']"
+    gsettings set "$prof" use-theme-colors false 2>/dev/null
+    gsettings set "$prof" background-color "$background" 2>/dev/null
+    gsettings set "$prof" foreground-color "$foreground" 2>/dev/null
+    gsettings set "$prof" palette "$pal" 2>/dev/null
+    ok "палитра pywal применена"
+}
+
+# =====================================================================
+#  newtab — страница новой вкладки Chrome
+# =====================================================================
+
+help_newtab() {
+    cat <<'EOF'
+newtab — своя страница новой вкладки в Chrome
+
+  desktop-kit newtab                     пересобрать страницу
+  desktop-kit newtab --add "Имя|URL"     добавить ярлык
+  desktop-kit newtab --remove Имя        убрать ярлык
+  desktop-kit newtab --list              показать ярлыки
+  desktop-kit newtab --edit              открыть список в редакторе
+  desktop-kit newtab --clock N           размер часов, по умолчанию 110
+  desktop-kit newtab --tile N            ширина плитки, по умолчанию 130
+
+  Значки берутся из локального кэша Chrome (Default/Favicons), поэтому
+  внутренние адреса получают настоящие иконки. Найденный значок
+  запоминается в icons.json и не теряется, даже если база потом промолчит.
+
+  Подключение к новой вкладке требует расширения — Chrome иначе не даёт.
+  Подробности: modules/chrome.md
+EOF
+}
+
+cmd_newtab() {
+    local action="rebuild"
+    value=""
+    local clock=110
+    local tile=130
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --add)     action="add"; value="${2:-}"; shift 2 ;;
+            --remove)  action="remove"; value="${2:-}"; shift 2 ;;
+            --list)    action="list"; shift ;;
+            --edit)    action="edit"; shift ;;
+            --clock) need_args "--clock" 2 "$#"; clock="${2:-110}"; shift 2 ;;
+            --tile) need_args "--tile" 2 "$#"; tile="${2:-130}"; shift 2 ;;
+            -h|--help) help_newtab; return 0 ;;
+            *) die "newtab: неизвестный параметр $1" ;;
+        esac
+    done
+
+    mkdir -p "$NEWTAB_DIR"
+    touch "$NEWTAB_LINKS"
+
+    case "$action" in
+        list)
+            head1 "ярлыки новой вкладки"
+            grep -v '^#' "$NEWTAB_LINKS" | grep '|' | sed 's/^/    /'
+            return 0
+            ;;
+        edit)
+            local editor="${EDITOR:-nano}"
+            "$editor" "$NEWTAB_LINKS"
+            ;;
+        add)
+            if [ -z "$value" ]; then
+                die "newtab: нужен формат \"Имя|https://адрес\""
+            fi
+            case "$value" in
+                *\|*) : ;;
+                *) die "newtab: нужен разделитель, формат \"Имя|https://адрес\"" ;;
+            esac
+            name="${value%%|*}"
+            if grep -q "^$name|" "$NEWTAB_LINKS"; then
+                bad "ярлык '$name' уже есть"
+                return 1
+            fi
+            if would "добавить ярлык $value"; then
+                return 0
+            fi
+            backup_once "$NEWTAB_LINKS" "newtab-links.txt"
+            echo "$value" >> "$NEWTAB_LINKS"
+            ok "добавлен: $value"
+            ;;
+        remove)
+            if [ -z "$value" ]; then
+                die "newtab: назови ярлык"
+            fi
+            if ! grep -q "^$value|" "$NEWTAB_LINKS"; then
+                bad "ярлыка '$value' нет"
+                return 1
+            fi
+            if would "убрать ярлык $value"; then
+                return 0
+            fi
+            backup_once "$NEWTAB_LINKS" "newtab-links.txt"
+            sed -i "/^$value|/d" "$NEWTAB_LINKS"
+            ok "убран: $value"
+            ;;
+    esac
+
+    if would "пересобрать страницу новой вкладки"; then
+        return 0
+    fi
+    rebuild_newtab "$clock" "$tile"
+}
+
+rebuild_newtab() {
+    clock="$1"
+    tile="$2"
+    head1 "сборка страницы"
+
+    local walldir=$(find_wallpaper_dir)
+    local current=$(current_wallpaper)
+    local curname=""
+    if [ -n "$current" ]; then
+        curname=$(basename "$current")
+    fi
+
+    local bg="#1a1b26"
+    colors="$HOME/.cache/wal/colors.sh"
+    if [ -f "$colors" ]; then
+        set +u
+        . "$colors"
+        if [ -n "${background:-}" ]; then
+            bg="$background"
+        fi
+        set -u
+    fi
+
+    # Пустой фильтр выбросил бы ВСЕ строки: grep -vF "" совпадает с любой.
+    local list=$(find "$walldir" -maxdepth 1 -type f \
+           -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | sort)
+    if [ -n "$curname" ]; then
+        list=$(printf '%s\n' "$list" | grep -vF "$curname")
+    fi
+    local imgs=$(printf '%s\n' "$list" | sed 's|.*|    "file://&",|')
+
+    # значки из кэша Chrome вместе с журналом: без -wal свежие не видны
+    local favsrc="$HOME/.config/google-chrome/Default/Favicons"
+    local favdb="/tmp/desktop-kit-favicons"
+    rm -f "$favdb" "$favdb-wal" "$favdb-shm" "$favdb-journal"
+    if [ -f "$favsrc" ]; then
+        cp "$favsrc" "$favdb" 2>/dev/null
+        for ext in "-wal" "-shm" "-journal"; do
+            if [ -f "$favsrc$ext" ]; then
+                cp "$favsrc$ext" "$favdb$ext" 2>/dev/null
+            fi
+        done
+    fi
+
+    local tiles=$(python3 - "$NEWTAB_LINKS" "$favdb" "$NEWTAB_DIR/icons.json" <<'PY'
+import sys, html, os, base64, sqlite3, json
+
+links, favdb, cache_path = sys.argv[1], sys.argv[2], sys.argv[3]
+
+cur = None
+if os.path.exists(favdb):
+    try:
+        cur = sqlite3.connect(favdb).cursor()
+    except Exception:
+        cur = None
+
+cache = {}
+if os.path.exists(cache_path):
+    try:
+        cache = json.load(open(cache_path, encoding='utf-8'))
+    except Exception:
+        cache = {}
+
+def from_chrome(host):
+    if cur is None:
+        return ''
+    try:
+        row = cur.execute(
+            'SELECT b.image_data FROM icon_mapping m '
+            'JOIN favicon_bitmaps b ON b.icon_id = m.icon_id '
+            'WHERE m.page_url LIKE ? AND length(b.image_data) > 0 '
+            'ORDER BY b.width DESC LIMIT 1', ('%' + host + '%',)).fetchone()
+    except Exception:
+        return ''
+    if not row or not row[0]:
+        return ''
+    return 'data:image/png;base64,' + base64.b64encode(row[0]).decode()
+
+def icon_for(host):
+    got = from_chrome(host)
+    if got:
+        cache[host] = got
+        return got
+    return cache.get(host, '')
+
+rows = []
+for line in open(links, encoding='utf-8'):
+    line = line.strip()
+    if not line or line.startswith('#') or '|' not in line:
+        continue
+    name, url = line.split('|', 1)
+    name = html.escape(name.strip()[:22])
+    url = html.escape(url.strip())
+    letter = html.escape(name[:1].upper()) if name else '?'
+    host = url.split('/')[2] if '://' in url else url
+
+    chain = []
+    if host:
+        chain = [icon_for(host),
+                 'https://%s/favicon.ico' % host,
+                 'https://www.google.com/s2/favicons?sz=64&domain=%s' % host]
+    chain = [c for c in chain if c]
+
+    if chain:
+        src, alts = chain[0], '|'.join(chain[1:])
+        ico = ('<img src="%s" data-alt="%s" data-letter="%s" onerror="nextIcon(this)">'
+               % (src, html.escape(alts), letter))
+    else:
+        ico = letter
+
+    rows.append('<a class="tile" href="%s"><span class="ico">%s</span>'
+                '<span class="cap">%s</span></a>' % (url, ico, name))
+
+try:
+    json.dump(cache, open(cache_path, 'w', encoding='utf-8'))
+except Exception:
+    pass
+
+sys.stderr.write('    значки: из Chrome и кэша %d\n' % len(cache))
+print('\n'.join(rows))
+PY
+)
+
+    cat > "$NEWTAB_DIR/index.html" <<EOF
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><title>New Tab</title>
+<style>
+  html,body{margin:0;height:100%;font-family:"JetBrainsMono Nerd Font",monospace;}
+  body{background:$bg center/cover no-repeat fixed;display:flex;align-items:center;
+       justify-content:center;flex-direction:column;gap:34px;}
+  .box{padding:30px 56px;border-radius:22px;background:rgba(0,0,0,.32);
+       backdrop-filter:blur(14px);text-align:center;}
+  .clock{font-size:${clock}px;font-weight:600;color:#fff;letter-spacing:2px;line-height:1;}
+  .date{font-size:24px;font-weight:600;color:#fff;opacity:.9;margin-top:8px;}
+  .tiles{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;max-width:900px;}
+  .tile{width:${tile}px;padding:22px 10px;border-radius:16px;background:rgba(0,0,0,.32);
+        backdrop-filter:blur(10px);text-decoration:none;display:flex;flex-direction:column;
+        align-items:center;gap:11px;transition:.15s;}
+  .tile:hover{background:rgba(255,255,255,.18);transform:translateY(-2px);}
+  .ico{width:52px;height:52px;border-radius:13px;background:rgba(255,255,255,.14);
+       display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:700;}
+  .ico img{width:34px;height:34px;}
+  .cap{font-size:16px;font-weight:700;color:#fff;max-width:116px;overflow:hidden;
+       text-overflow:ellipsis;white-space:nowrap;}
+  .hint{position:fixed;bottom:16px;right:20px;font-size:12px;color:#fff;opacity:.35;}
+  .toast{position:fixed;bottom:16px;left:20px;font-size:13px;color:#fff;opacity:0;
+         background:rgba(0,0,0,.45);padding:7px 13px;border-radius:9px;transition:opacity .25s;}
+</style></head>
+<body>
+  <div class="box"><div class="clock" id="c"></div><div class="date" id="d"></div></div>
+  <div class="tiles">
+$tiles
+  </div>
+  <div class="hint">← → смена фона</div>
+  <div class="toast" id="t"></div>
+<script>
+function nextIcon(img){
+  var rest=img.dataset.alt;
+  if(!rest){rest='';}
+  var list=rest.split('|').filter(Boolean);
+  if(list.length){
+    img.src=list.shift();
+    img.dataset.alt=list.join('|');
+    return;
+  }
+  var letter=img.dataset.letter;
+  if(!letter){letter='?';}
+  img.replaceWith(document.createTextNode(letter));
+}
+const imgs=[
+$imgs
+];
+const KEY='ntbg';
+let idx=parseInt(localStorage.getItem(KEY),10);
+if(isNaN(idx)){idx=-1;}
+if(idx<0){idx=Math.floor(Math.random()*imgs.length);}
+if(idx>=imgs.length){idx=Math.floor(Math.random()*imgs.length);}
+function show(i,say){
+  if(!imgs.length)return;
+  local idx=(i%imgs.length+imgs.length)%imgs.length;
+  localStorage.setItem(KEY,idx);
+  document.body.style.backgroundImage='url("'+imgs[idx]+'")';
+  if(say){
+    const t=document.getElementById('t');
+    t.textContent=(idx+1)+' / '+imgs.length;
+    t.style.opacity='1';
+    clearTimeout(window._tm);
+    window._tm=setTimeout(function(){t.style.opacity='0';},1400);
+  }
+}
+show(idx,false);
+document.addEventListener('keydown',function(e){
+  if(e.key==='ArrowRight'){show(idx+1,true);e.preventDefault();}
+  if(e.key==='ArrowLeft'){show(idx-1,true);e.preventDefault();}
+});
+function tick(){const n=new Date();
+  document.getElementById('c').textContent=String(n.getHours()).padStart(2,'0')+':'+String(n.getMinutes()).padStart(2,'0');
+  document.getElementById('d').textContent=n.toLocaleDateString('ru-RU',{weekday:'long',day:'numeric',month:'long'});}
+tick();setInterval(tick,10000);
+</script>
+</body></html>
+EOF
+
+    rm -f "$favdb" "$favdb-wal" "$favdb-shm" "$favdb-journal"
+
+    ok "страница: $NEWTAB_DIR/index.html"
+    note "ярлыков: $(grep -c 'class=\"tile\"' "$NEWTAB_DIR/index.html")"
+    note "со значками: $(grep -o 'src=\"data:image' "$NEWTAB_DIR/index.html" | wc -l)"
+    note "картинок фона: $(printf '%s\n' "$imgs" | grep -c 'file://')"
+}
+
+# =====================================================================
+#  wallpapers / wall — банк обоев и смена
+# =====================================================================
+
+find_wallpaper_dir() {
+    for d in "$HOME/Pictures/wallpapers-uw" "$HOME/Изображения/wallpapers-uw" \
+             "$HOME/Pictures/wallpapers" "$HOME/Изображения/wallpapers"; do
+        if [ -d "$d" ]; then
+            echo "$d"
+            return 0
+        fi
+    done
+    local p=$(xdg-user-dir PICTURES 2>/dev/null)
+    if [ -z "$p" ]; then
+        p="$HOME/Pictures"
+    fi
+    echo "$p/wallpapers-uw"
+}
+
+current_wallpaper() {
+    saved="$STATE_DIR/current-wallpaper"
+    if [ -s "$saved" ]; then
+        local c=$(cat "$saved")
+        if [ -f "$c" ]; then
+            echo "$c"
+            return 0
+        fi
+    fi
+    g=$(gsettings get org.gnome.desktop.background picture-uri-dark 2>/dev/null | tr -d "'" | sed 's#^file://##')
+    if [ ! -f "$g" ]; then
+        g=$(gsettings get org.gnome.desktop.background picture-uri 2>/dev/null | tr -d "'" | sed 's#^file://##')
+    fi
+    if [ -f "$g" ]; then
+        echo "$g"
+    fi
+}
+
+detect_resolution() {
+    r=$(cat /sys/class/drm/card*-*/modes 2>/dev/null \
+        | grep -oE '^[0-9]+x[0-9]+$' | sort -t x -k1,1nr -k2,2nr | head -1)
+    if [ -z "$r" ]; then
+        r=$(xrandr 2>/dev/null | grep -oE '[0-9]+x[0-9]+' | head -1)
+    fi
+    if [ -z "$r" ]; then
+        r="1920x1080"
+    fi
+    echo "$r"
+}
+
+help_wallpapers() {
+    cat <<'EOF'
+wallpapers — банк обоев
+
+  desktop-kit wallpapers                добрать 10 картинок
+  desktop-kit wallpapers --count 25     добрать 25
+  desktop-kit wallpapers --init         первая заливка (250)
+  desktop-kit wallpapers --status       банк, расписание, последние запуски
+  desktop-kit wallpapers --timer Wed 13:00   пополнять по расписанию
+  desktop-kit wallpapers --timer off    снять расписание
+  desktop-kit wallpapers --prune 900    оставить 900 самых свежих
+  desktop-kit wallpapers --urls         показать, какие запросы уйдут
+
+  Качает рисованное под родное разрешение монитора. Набор тем и seed
+  привязаны к номеру недели: внутри недели выдача повторяется, следующая
+  неделя приносит другое.
+
+  Расписание ставит копию скрипта в ~/bin и ссылается туда, поэтому
+  скачанный файл можно потом удалить. День будний не случайно: рабочий
+  ноутбук по выходным выключен, а Persistent лишь отложил бы запуск.
+EOF
+}
+
+week_themes() {
+    local all="digital+art artwork illustration scenery landscape fantasy space \
+mountains forest sunset ocean neon city abstract minimal aurora clouds \
+mist canyon lake nordic"
+    local seed=$(date +%V)
+    echo "$all" | tr ' ' '\n' | grep -v '^$' \
+        | shuf --random-source=<(yes "$seed") | head -6 | tr '\n' ' '
+}
+
+wallpaper_urls() {
+    local res="$1"
+    seed=$(date +%GW%V | tr -d 'W-' | cut -c1-6)
+    for q in $(week_themes); do
+        echo "$WALLHAVEN?q=$q&atleast=$res&categories=100&purity=100&sorting=random&seed=$seed&page=1"
+        echo "$WALLHAVEN?q=$q&atleast=$res&categories=100&purity=100&sorting=toplist&topRange=1y&page=1"
+    done
+}
+
+cmd_wallpapers() {
+    local count=10
+    action="add"
+    local day=""
+    local at=""
+    local keep=900
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --count) need_args "--count" 2 "$#"; count="${2:-10}"; shift 2 ;;
+            --init)   action="init"; count=250; shift ;;
+            --status) action="status"; shift ;;
+            --timer)
+                # off указывается одним словом: --timer off
+                if [ "${2:-}" = "off" ]; then
+                    action="timer"; day="off"; at=""; shift 2
+                else
+                    need_args "--timer" 3 "$#"
+                    action="timer"; day="$2"; at="$3"; shift 3
+                fi
+                ;;
+            --prune)  action="prune"; keep="${2:-900}"; shift 2 ;;
+            --urls)   action="urls"; shift ;;
+            -h|--help) help_wallpapers; return 0 ;;
+            *) die "wallpapers: неизвестный параметр $1" ;;
+        esac
+    done
+
+    walldir=$(find_wallpaper_dir)
+
+    case "$action" in
+        status)
+            head1 "банк обоев"
+            if [ -d "$walldir" ]; then
+                local n=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+                local size=$(du -sh "$walldir" 2>/dev/null | cut -f1)
+                note "каталог:    $walldir"
+                note "картинок:   $n"
+                note "размер:     $size"
+            else
+                note "каталога нет: $walldir"
+            fi
+            note "разрешение: $(detect_resolution)"
+            local unit="$HOME/.config/systemd/user/desktop-kit-wallpapers.timer"
+            if [ -f "$unit" ]; then
+                note "расписание: $(grep '^OnCalendar' "$unit" | cut -d= -f2)"
+                systemctl --user list-timers desktop-kit-wallpapers.timer --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/    /'
+            else
+                note "расписание: не настроено"
+            fi
+            return 0
+            ;;
+        urls)
+            head1 "запросы недели"
+            note "разрешение: $(detect_resolution)"
+            note "темы: $(week_themes)"
+            wallpaper_urls "$(detect_resolution)" | sed 's/^/    /'
+            return 0
+            ;;
+        timer)
+            install_wallpaper_timer "$day" "$at"
+            return $?
+            ;;
+        prune)
+            prune_wallpapers "$walldir" "$keep"
+            return $?
+            ;;
+    esac
+
+    require_tools curl jq file
+    mkdir -p "$walldir"
+    res=$(detect_resolution)
+    local have_now=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+    head1 "пополнение банка"
+    note "каталог $walldir: $have_now шт., разрешение $res, добираю $count"
+
+    if would "скачать до $count картинок"; then
+        return 0
+    fi
+
+    local pool=$(mktemp)
+    local fresh=$(mktemp)
+    local take=$(mktemp)
+    local failed=0
+    for u in $(wallpaper_urls "$res"); do
+        r=$(curl -sf --max-time 25 "$u" 2>/dev/null)
+        if [ -z "$r" ]; then
+            failed=$((failed + 1))
+            continue
+        fi
+        echo "$r" | jq -r '.data[]?.path' 2>/dev/null >> "$pool"
+        sleep 2
+    done
+
+    if [ ! -s "$pool" ]; then
+        rm -f "$pool" "$fresh" "$take"
+        bad "wallhaven не ответил ни на один запрос"
+        return 1
+    fi
+    if [ "$failed" -gt 0 ]; then
+        note "запросов без ответа: $failed"
+    fi
+
+    grep '\.jpg$' "$pool" | sort -u | shuf > "$pool.all"
+    : > "$fresh"
+    while read -r url; do
+        name=$(basename "$url")
+        if [ ! -f "$walldir/$name" ]; then
+            echo "$url" >> "$fresh"
+        fi
+    done < "$pool.all"
+
+    head -n "$count" "$fresh" > "$take"
+    n=$(wc -l < "$take")
+    note "новых к загрузке: $n"
+    if [ "$n" -eq 0 ]; then
+        rm -f "$pool" "$pool.all" "$fresh" "$take"
+        ok "всё, что нашлось, уже в банке"
+        return 0
+    fi
+
+    ( cd "$walldir"; xargs -r -n1 -P3 curl -sf --retry 2 --retry-delay 2 \
+        --max-time 120 --remove-on-error -O ) < "$take"
+
+    local bad_files=0
+    for f in "$walldir"/*; do
+        if [ -f "$f" ]; then
+            if ! file --brief --mime-type "$f" | grep -q '^image/'; then
+                rm -f "$f"
+                bad_files=$((bad_files + 1))
+            fi
+        fi
+    done
+    local heavy=$(find "$walldir" -maxdepth 1 -type f -size +12M 2>/dev/null | wc -l)
+    find "$walldir" -maxdepth 1 -type f -size +12M -delete 2>/dev/null
+
+    local now=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+    if [ "$bad_files" -gt 0 ]; then
+        note "выброшено битых: $bad_files"
+    fi
+    if [ "$heavy" -gt 0 ]; then
+        note "выброшено тяжелее 12 МБ: $heavy"
+    fi
+    ok "добавлено $((now - have_now)), всего в банке $now"
+
+    if [ -x "$BIN_DIR/desktop-kit" ]; then
+        "$BIN_DIR/desktop-kit" newtab >/dev/null 2>&1
+        ok "страница новой вкладки пересобрана"
+    fi
+
+    if have notify-send; then
+        notify-send -a "Обои" "Банк пополнен" "добавлено $((now - have_now)), всего $now" 2>/dev/null
+    fi
+
+    rm -f "$pool" "$pool.all" "$fresh" "$take"
+}
+
+install_wallpaper_timer() {
+    day="$1"
+    at="$2"
+    local unit_dir="$HOME/.config/systemd/user"
+    name="desktop-kit-wallpapers"
+
+    if [ "$day" = "off" ]; then
+        if would "снять расписание"; then
+            return 0
+        fi
+        systemctl --user disable --now "$name.timer" >/dev/null 2>&1
+        rm -f "$unit_dir/$name.timer" "$unit_dir/$name.service"
+        systemctl --user daemon-reload 2>/dev/null
+        ok "расписание снято, банк и скрипт на месте"
+        return 0
+    fi
+
+    if ! echo "$day" | grep -qE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(,(Mon|Tue|Wed|Thu|Fri|Sat|Sun))*$'; then
+        die "день: Mon Tue Wed Thu Fri Sat Sun, можно через запятую"
+    fi
+    if ! echo "$at" | grep -qE '^[0-2][0-9]:[0-5][0-9]$'; then
+        die "время в формате ЧЧ:ММ"
+    fi
+
+    if would "поставить расписание $day $at"; then
+        return 0
+    fi
+
+    # копия в постоянном месте: иначе уборка ~/Desktop сломает расписание
+    mkdir -p "$BIN_DIR"
+    target="$BIN_DIR/desktop-kit"
+    if [ "$SELF" != "$target" ]; then
+        cp "$SELF" "$target"
+        chmod +x "$target"
+        ok "скрипт установлен: $target"
+    fi
+
+    mkdir -p "$unit_dir"
+    cat > "$unit_dir/$name.service" <<EOF
+[Unit]
+Description=Пополнение банка обоев
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+ExecStart=$target wallpapers --count 10
+EOF
+
+    cat > "$unit_dir/$name.timer" <<EOF
+[Unit]
+Description=Пополнение банка обоев по расписанию
+
+[Timer]
+OnCalendar=$day $at
+RandomizedDelaySec=2h
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
+
+    systemctl --user daemon-reload 2>/dev/null
+    systemctl --user enable --now "$name.timer" >/dev/null 2>&1
+    ok "расписание: $day в $at, по 10 картинок"
+    systemctl --user list-timers "$name.timer" --no-pager 2>/dev/null | sed -n '1,2p' | sed 's/^/    /'
+}
+
+prune_wallpapers() {
+    walldir="$1"
+    keep="$2"
+    if ! is_number "$keep"; then
+        die "prune: число"
+    fi
+    have_now=$(find "$walldir" -maxdepth 1 -type f | wc -l)
+    if [ "$have_now" -le "$keep" ]; then
+        ok "в банке $have_now, удалять нечего"
+        return 0
+    fi
+    local drop=$((have_now - keep))
+    head1 "чистка банка"
+    note "в банке $have_now, удалить $drop самых старых"
+    if would "удалить $drop картинок"; then
+        return 0
+    fi
+    if ! confirm "продолжить?"; then
+        note "отменено"
+        return 0
+    fi
+    ls -t "$walldir" | tail -n "$drop" | while read -r f; do
+        rm -f "$walldir/$f"
+    done
+    ok "удалено $drop, осталось $(find "$walldir" -maxdepth 1 -type f | wc -l)"
+}
+
+help_wall() {
+    cat <<'EOF'
+wall — смена обоев по списку каталога
+
+  desktop-kit wall            следующая по порядку
+  desktop-kit wall --prev     предыдущая
+  desktop-kit wall --random   случайная
+  desktop-kit wall --set ФАЙЛ конкретная
+  desktop-kit wall --show     какая стоит и её номер
+
+  Листает каталог по порядку, а не по истории показов. Позиция
+  запоминается ИМЕНЕМ файла: банк пополняется, и номер бы съезжал.
+
+  Заодно обновляет палитру pywal и пересобирает страницу новой вкладки,
+  чтобы её фон не совпал с рабочим столом.
+EOF
+}
+
+cmd_wall() {
+    action="next"
+    target=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --prev)    action="prev"; shift ;;
+            --random)  action="random"; shift ;;
+            --set)     action="set"; target="${2:-}"; shift 2 ;;
+            --show)    action="show"; shift ;;
+            -h|--help) help_wall; return 0 ;;
+            *) die "wall: неизвестный параметр $1" ;;
+        esac
+    done
+
+    walldir=$(find_wallpaper_dir)
+    local tmp=$(mktemp)
+    find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | sort > "$tmp"
+    local total=$(wc -l < "$tmp")
+    if [ "$total" -eq 0 ]; then
+        rm -f "$tmp"
+        die "в каталоге нет картинок: $walldir"
+    fi
+
+    cur=$(current_wallpaper)
+    local pos=0
+    if [ -n "$cur" ]; then
+        line=$(grep -n -x -F "$cur" "$tmp" | head -1 | cut -d: -f1)
+        if [ -n "$line" ]; then
+            pos="$line"
+        fi
+    fi
+
+    case "$action" in
+        show)
+            head1 "обои"
+            note "каталог:  $walldir"
+            note "картинок: $total"
+            if [ "$pos" = "0" ]; then
+                note "позиция:  вне списка"
+            else
+                note "позиция:  $pos"
+            fi
+            note "файл:     $cur"
+            rm -f "$tmp"
+            return 0
+            ;;
+        random)
+            file=$(shuf -n1 "$tmp")
+            ;;
+        set)
+            if [ ! -f "$target" ]; then
+                rm -f "$tmp"
+                die "нет такого файла: $target"
+            fi
+            file=$(readlink -f "$target")
+            ;;
+        next|prev)
+            local delta=1
+            if [ "$action" = "prev" ]; then
+                delta=-1
+            fi
+            if [ "$pos" -eq 0 ]; then
+                local nextpos=1
+            else
+                nextpos=$(( (pos - 1 + delta + total) % total + 1 ))
+            fi
+            file=$(sed -n "${nextpos}p" "$tmp")
+            ;;
+    esac
+    rm -f "$tmp"
+
+    if would "поставить обои $file"; then
+        return 0
+    fi
+
+    mkdir -p "$STATE_DIR"
+    echo "$file" > "$STATE_DIR/current-wallpaper"
+    gsettings set org.gnome.desktop.background picture-uri "file://$file" 2>/dev/null
+    gsettings set org.gnome.desktop.background picture-uri-dark "file://$file" 2>/dev/null
+    gsettings set org.gnome.desktop.background picture-options 'zoom' 2>/dev/null
+    gsettings set org.gnome.desktop.screensaver picture-uri "file://$file" 2>/dev/null
+
+    if have wal; then
+        wal -i "$file" -n -q >/dev/null 2>&1
+        prof=$(term_profile)
+        if [ -n "$prof" ]; then
+            apply_wal_palette "$prof" >/dev/null 2>&1
+        fi
+    fi
+
+    if [ -x "$BIN_DIR/desktop-kit" ]; then
+        ( "$BIN_DIR/desktop-kit" newtab >/dev/null 2>&1 & )
+    fi
+
+    ok "$(basename "$file")"
+    if have notify-send; then
+        notify-send -a "Обои" -t 1500 "$(basename "$file")" 2>/dev/null
+    fi
+}
+
+# =====================================================================
+#  app — тема отдельного приложения
+# =====================================================================
+
+help_app() {
+    cat <<'EOF'
+app — своя тема для одного приложения
+
+  desktop-kit app evolution --theme Yaru
+  desktop-kit app ИМЯ --theme ТЕМА
+  desktop-kit app ИМЯ --reset
+
+  Приложению подставляется GTK_THEME через его же ярлык в
+  ~/.local/share/applications. Правятся ВСЕ строки Exec, включая
+  пункты контекстного меню дока — иначе "Написать письмо" откроется
+  в прежней теме.
+
+  Работает только для GTK-приложений. Kate и прочие Qt настраиваются
+  через qt6ct или Kvantum.
+EOF
+}
+
+cmd_app() {
+    local app=""
+    theme=""
+    local reset=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --theme) need_args "--theme" 2 "$#"; theme="${2:-}"; shift 2 ;;
+            --reset)   reset=1; shift ;;
+            -h|--help) help_app; return 0 ;;
+            -*) die "app: неизвестный параметр $1" ;;
+            *) app="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$app" ]; then
+        die "app: назови приложение, например evolution"
+    fi
+
+    src=""
+    for f in "/usr/share/applications/org.gnome.$(echo "$app" | sed 's/^./\U&/').desktop" \
+             "/usr/share/applications/$app.desktop"; do
+        if [ -f "$f" ]; then
+            src="$f"
+        fi
+    done
+    if [ -z "$src" ]; then
+        found=$(ls /usr/share/applications/ 2>/dev/null | grep -i "$app" | head -3)
+        bad "ярлык приложения '$app' не найден"
+        if [ -n "$found" ]; then
+            note "похожие: $found"
+        fi
+        return 1
+    fi
+
+    dst="$HOME/.local/share/applications/$(basename "$src")"
+
+    if [ "$reset" = "1" ]; then
+        if would "убрать свой ярлык $dst"; then
+            return 0
+        fi
+        rm -f "$dst"
+        if have update-desktop-database; then
+            update-desktop-database "$HOME/.local/share/applications" 2>/dev/null
+        fi
+        ok "свой ярлык убран, приложение вернулось к системной теме"
+        return 0
+    fi
+
+    if [ -z "$theme" ]; then
+        die "app: нужна тема, например --theme Yaru"
+    fi
+    if ! theme_exists "$theme"; then
+        bad "темы '$theme' нет"
+        note "доступные: $(list_themes | tr '\n' ' ')"
+        return 1
+    fi
+
+    head1 "тема для $app"
+    if would "подставить GTK_THEME=$theme в $dst"; then
+        return 0
+    fi
+
+    mkdir -p "$(dirname "$dst")"
+    cp "$src" "$dst"
+
+    # каждый Exec, включая Actions: иначе часть пунктов останется прежней
+    n=0
+    tmp=$(mktemp)
+    while IFS= read -r line; do
+        case "$line" in
+            Exec=*)
+                local cmd="${line#Exec=}"
+                case "$cmd" in
+                    env\ *)
+                        local rest="${cmd#env }"
+                        while true; do
+                            local word="${rest%% *}"
+                            case "$word" in
+                                *=*) rest="${rest#* }" ;;
+                                *) break ;;
+                            esac
+                        done
+                        cmd="$rest"
+                        ;;
+                esac
+                line="Exec=env GTK_THEME=$theme $cmd"
+                n=$((n + 1))
+                ;;
+        esac
+        printf '%s\n' "$line" >> "$tmp"
+    done < "$dst"
+    mv "$tmp" "$dst"
+
+    if have update-desktop-database; then
+        update-desktop-database "$HOME/.local/share/applications" 2>/dev/null
+    fi
+    ok "$app будет запускаться с темой $theme (строк запуска: $n)"
+    note "проверить: GTK_THEME=$theme $app"
+}
+
+# =====================================================================
+#  serve — локальная апка по http
+# =====================================================================
+
+help_serve() {
+    cat <<'EOF'
+serve — отдать локальную страницу по http://localhost
+
+  desktop-kit serve ПУТЬ [--port N]
+  desktop-kit serve --stop ИМЯ
+  desktop-kit serve --list
+
+  Плитка с адресом file:// на странице новой вкладки молча не
+  открывается: страница живёт в контексте расширения, а Chrome
+  запрещает уходить оттуда к локальным файлам. По http ограничения нет.
+
+  Слушает только 127.0.0.1 — из сети апка недоступна.
+EOF
+}
+
+cmd_serve() {
+    local path=""
+    local port=8800
+    action="start"
+    name=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --port) need_args "--port" 2 "$#"; port="${2:-8800}"; shift 2 ;;
+            --stop)    action="stop"; name="${2:-}"; shift 2 ;;
+            --list)    action="list"; shift ;;
+            -h|--help) help_serve; return 0 ;;
+            -*) die "serve: неизвестный параметр $1" ;;
+            *) path="$1"; shift ;;
+        esac
+    done
+
+    unit_dir="$HOME/.config/systemd/user"
+
+    if [ "$action" = "list" ]; then
+        head1 "локальные апки"
+        ls "$unit_dir"/desktop-kit-serve-*.service 2>/dev/null | while read -r f; do
+            n=$(basename "$f" .service)
+            note "$n — $(grep '^ExecStart' "$f" | sed 's/.*--directory //')"
+        done
+        return 0
+    fi
+
+    if [ "$action" = "stop" ]; then
+        if [ -z "$name" ]; then
+            die "serve: назови апку, список: $0 serve --list"
+        fi
+        unit="desktop-kit-serve-$name"
+        if would "остановить $unit"; then
+            return 0
+        fi
+        systemctl --user disable --now "$unit.service" >/dev/null 2>&1
+        rm -f "$unit_dir/$unit.service"
+        systemctl --user daemon-reload 2>/dev/null
+        ok "остановлено: $name"
+        return 0
+    fi
+
+    if [ -z "$path" ]; then
+        die "serve: укажи каталог с index.html"
+    fi
+    if [ ! -d "$path" ]; then
+        die "каталога нет: $path"
+    fi
+    if [ ! -f "$path/index.html" ]; then
+        bad "в каталоге нет index.html"
+        note "что там лежит:"
+        ls "$path" | sed 's/^/      /'
+        return 1
+    fi
+    if ! is_number "$port"; then
+        die "serve: порт — число"
+    fi
+
+    path=$(cd "$path"; pwd)
+    name=$(basename "$path")
+    unit="desktop-kit-serve-$name"
+
+    head1 "апка $name на порту $port"
+
+    if ss -ltn 2>/dev/null | grep -q ":$port "; then
+        if systemctl --user is-active --quiet "$unit.service"; then
+            note "порт занят нашей же службой — перезапускаю"
+            systemctl --user stop "$unit.service" 2>/dev/null
+        else
+            bad "порт $port занят чужим процессом"
+            ss -ltnp 2>/dev/null | grep ":$port " | sed 's/^/      /'
+            note "возьми другой: $0 serve \"$path\" --port 8801"
+            return 1
+        fi
+    fi
+
+    if would "поднять службу $unit"; then
+        return 0
+    fi
+
+    mkdir -p "$unit_dir"
+    cat > "$unit_dir/$unit.service" <<EOF
+[Unit]
+Description=Локальная апка $name
+After=network.target
+
+[Service]
+ExecStart=/usr/bin/python3 -m http.server $port --bind 127.0.0.1 --directory $path
+Restart=on-failure
+
+[Install]
+WantedBy=default.target
+EOF
+
+    systemctl --user daemon-reload 2>/dev/null
+    systemctl --user enable --now "$unit.service" >/dev/null 2>&1
+    sleep 1
+
+    code=$(curl -s -o /dev/null -w '%{http_code}' "http://localhost:$port/" 2>/dev/null)
+    if [ "$code" = "200" ]; then
+        ok "отвечает: http://localhost:$port"
+        note "добавить на новую вкладку: $0 newtab --add \"$name|http://localhost:$port\""
+    else
+        bad "не отвечает (код '$code')"
+        note "журнал: journalctl --user -u $unit -n 20"
+        return 1
+    fi
+}
+
+# =====================================================================
+#  status — что применено
+# =====================================================================
+
+cmd_status() {
+    head1 "состояние"
+    note "тема окон:     $(gi_get gtk-theme)"
+    note "тема значков:  $(gi_get icon-theme)"
+    note "схема:         $(gi_get color-scheme)"
+    note "шрифт:         $(gi_get font-name)"
+    note "моноширинный:  $(gi_get monospace-font-name)"
+
+    echo
+    for f in "$CSS3" "$CSS4"; do
+        local label=$(basename "$(dirname "$f")")
+        if [ -L "$f" ]; then
+            bad "$label: СИМЛИНК на $(readlink -f "$f") — наши правки туда писать нельзя"
+            continue
+        fi
+        if [ ! -f "$f" ]; then
+            note "$label: файла нет"
+            continue
+        fi
+        local blocks=$(grep -o 'dk:[a-z]*-begin' "$f" 2>/dev/null | sed 's/dk://; s/-begin//' | tr '\n' ' ')
+        if [ -n "$blocks" ]; then
+            ok "$label: $blocks"
+        else
+            note "$label: наших правил нет"
+        fi
+        if grep -q '!important' "$f" 2>/dev/null; then
+            bad "$label: содержит !important — GTK отбросит эти правила целиком"
+        fi
+    done
+
+    echo
+    walldir=$(find_wallpaper_dir)
+    if [ -d "$walldir" ]; then
+        n=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+        note "банк обоев:    $n шт. в $walldir"
+    fi
+    if [ -f "$HOME/.config/systemd/user/desktop-kit-wallpapers.timer" ]; then
+        note "пополнение:    $(grep '^OnCalendar' "$HOME/.config/systemd/user/desktop-kit-wallpapers.timer" | cut -d= -f2)"
+    fi
+    if [ -f "$NEWTAB_DIR/index.html" ]; then
+        note "новая вкладка: $(grep -c 'class="tile"' "$NEWTAB_DIR/index.html") ярлыков"
+    fi
+    if [ -f "$CONKY_LUA" ]; then
+        note "виджет:        $(grep -m1 'local RADIUS' "$CONKY_LUA" | tr -d ' ')"
+    fi
+
+    echo
+    if [ -f "$BEFORE" ]; then
+        note "что запомнено для отката:"
+        sed 's/^/      /' "$BEFORE"
+    else
+        note "снимка исходных настроек нет — откатывать нечего"
+    fi
+    if [ -d "$BACKUP_DIR" ]; then
+        n=$(ls "$BACKUP_DIR" 2>/dev/null | wc -l)
+        note "резервных копий файлов: $n"
+    fi
+}
+
+# =====================================================================
+#  revert — откат
+# =====================================================================
+
+help_revert() {
+    cat <<'EOF'
+revert — вернуть как было
+
+  desktop-kit revert              откатить всё
+  desktop-kit revert buttons      только кнопки
+  desktop-kit revert corners      только углы
+  desktop-kit revert widget       только виджет
+  desktop-kit revert theme        тему, значки, шрифт, схему
+
+  Возвращаются те значения, что были ДО первого изменения, а не
+  умолчания системы: они записываются при первом запуске каждой команды.
+EOF
+}
+
+cmd_revert() {
+    local what="${1:-all}"
+    case "$what" in
+        -h|--help) help_revert; return 0 ;;
+    esac
+
+    head1 "откат: $what"
+
+    if [ "$what" = "all" ]; then
+        for tag in buttons corners; do
+            css_strip "$tag" "$CSS3"
+            css_strip "$tag" "$CSS4"
+        done
+        ok "правила из gtk.css убраны"
+
+        restore_backup "$CSS3" "gtk-3.0-gtk.css"
+        restore_backup "$CSS4" "gtk-4.0-gtk.css"
+
+        local cur_icon=$(gi_get icon-theme)
+        case "$cur_icon" in
+            *-dk-glyphs) rm -rf "$HOME/.local/share/icons/$cur_icon"; ok "тема значков удалена" ;;
+        esac
+
+        for pair in "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
+                    "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name" \
+                    "MONOSPACE_FONT_NAME:monospace-font-name"; do
+            key="${pair%%:*}"
+            local setting="${pair##*:}"
+            value=$(recall "$key")
+            if [ -n "$value" ]; then
+                gi_set "$setting" "$value"
+                ok "$setting: $value"
+            fi
+        done
+
+        local shell_theme=$(recall SHELL_THEME)
+        if [ -n "$shell_theme" ]; then
+            dconf write /org/gnome/shell/extensions/user-theme/name "'$shell_theme'" 2>/dev/null
+            ok "тема оболочки: $shell_theme"
+        fi
+
+        if restore_backup "$CONKY_CONF" "conky-main.conf"; then
+            rm -f "$CONKY_LUA"
+            restart_conky
+        fi
+
+        restore_backup "$NEWTAB_LINKS" "newtab-links.txt"
+
+        rm -f "$BEFORE"
+        restart_gtk_apps
+        echo
+        note "обои, банк картинок и расписание не трогались"
+        return 0
+    fi
+
+    case "$what" in
+        buttons|corners)
+            css_strip "$what" "$CSS3"
+            css_strip "$what" "$CSS4"
+            ok "правила '$what' убраны"
+            if [ "$what" = "buttons" ]; then
+                cur_icon=$(gi_get icon-theme)
+                case "$cur_icon" in
+                    *-dk-glyphs)
+                        rm -rf "$HOME/.local/share/icons/$cur_icon"
+                        value=$(recall ICON_THEME)
+                        if [ -n "$value" ]; then
+                            gi_set icon-theme "$value"
+                            ok "тема значков: $value"
+                        fi
+                        ;;
+                esac
+            fi
+            restart_gtk_apps
+            ;;
+        widget)
+            if restore_backup "$CONKY_CONF" "conky-main.conf"; then
+                rm -f "$CONKY_LUA"
+                restart_conky
+            else
+                bad "резервной копии конфига conky нет"
+            fi
+            ;;
+        theme)
+            for pair in "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
+                        "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name"; do
+                key="${pair%%:*}"
+                setting="${pair##*:}"
+                value=$(recall "$key")
+                if [ -n "$value" ]; then
+                    gi_set "$setting" "$value"
+                    ok "$setting: $value"
+                fi
+            done
+            restart_gtk_apps
+            ;;
+        *)
+            die "revert: не знаю подсистемы '$what'"
+            ;;
+    esac
+}
+
+# =====================================================================
+#  audit — снимок системы
+# =====================================================================
+
+cmd_audit() {
+    out="${1:-$HOME/desktop-audit-$(date +%F).md}"
+    local tools="$(dirname "$SELF")/tools/desktop-audit.sh"
+    if [ -f "$tools" ]; then
+        bash "$tools" "$out"
+        return $?
+    fi
+    bad "не нашёл tools/desktop-audit.sh рядом со скриптом"
+    note "он собирает полный снимок системы; возьми его из репозитория"
+    return 1
+}
+
+# =====================================================================
+#  selftest — проверка на живой машине
+# =====================================================================
+
+help_selftest() {
+    cat <<'EOF'
+selftest — проверить себя прямо на этой машине
+
+  desktop-kit selftest            безопасные проверки, ничего не меняет
+  desktop-kit selftest --full     плюс применение и откат каждой подсистемы
+
+  Безопасный режим: разбор аргументов, наличие инструментов, доступность
+  сети и wallhaven, чтение кэша значков Chrome, состояние файлов.
+
+  Полный режим дополнительно применяет каждую подсистему, проверяет
+  результат и откатывает. Занимает пару минут.
+
+  В конце рядом кладётся архив с логами и снимком системы — его можно
+  переслать целиком.
+EOF
+}
+
+TEST_PASS=0
+TEST_FAIL=0
+TEST_LOG=""
+
+t_ok()   { TEST_PASS=$((TEST_PASS + 1)); echo "  OK   $*"; TEST_LOG="$TEST_LOG
+OK   $*"; }
+t_fail() { TEST_FAIL=$((TEST_FAIL + 1)); echo "  FAIL $*"; TEST_LOG="$TEST_LOG
+FAIL $*"; }
+t_skip() { echo "  --   $* (пропущено)"; TEST_LOG="$TEST_LOG
+SKIP $*"; }
+
+cmd_selftest() {
+    local full=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --full)    full=1; shift ;;
+            -h|--help) help_selftest; return 0 ;;
+            *) die "selftest: неизвестный параметр $1" ;;
+        esac
+    done
+
+    local started=$(date '+%Y-%m-%d %H:%M:%S')
+    local report_dir="$HOME/desktop-kit-selftest"
+    rm -rf "$report_dir"
+    mkdir -p "$report_dir"
+
+    head1 "самопроверка (безопасная часть)"
+
+    # --- окружение ---
+    if [ "$(uname -s)" = "Linux" ]; then
+        t_ok "система Linux"
+    else
+        t_fail "не Linux"
+    fi
+    for t in bash sed grep awk find curl; do
+        if have "$t"; then
+            t_ok "есть $t"
+        else
+            t_fail "нет $t — часть команд не сработает"
+        fi
+    done
+    for t in jq file python3 gsettings dconf conky notify-send papirus-folders wal; do
+        if have "$t"; then
+            t_ok "есть $t"
+        else
+            t_skip "нет $t"
+        fi
+    done
+
+    # --- разбор аргументов: мусор должен отвергаться ---
+    if bash "$SELF" buttons --wat >/dev/null 2>&1; then
+        t_fail "buttons проглотил неизвестный параметр"
+    else
+        t_ok "неизвестный параметр отвергается"
+    fi
+    if bash "$SELF" buttons --size abc def >/dev/null 2>&1; then
+        t_fail "buttons принял нечисловой размер"
+    else
+        t_ok "нечисловой размер отвергается"
+    fi
+    if bash "$SELF" corners --radius abc >/dev/null 2>&1; then
+        t_fail "corners принял нечисловой радиус"
+    else
+        t_ok "нечисловой радиус отвергается"
+    fi
+    if bash "$SELF" wallpapers --timer Funday 13:00 >/dev/null 2>&1; then
+        t_fail "wallpapers принял несуществующий день"
+    else
+        t_ok "кривой день расписания отвергается"
+    fi
+
+    # --- режим проверки ничего не меняет ---
+    local before_sum=""
+    if [ -f "$CSS3" ]; then
+        before_sum=$(md5sum "$CSS3" | cut -d' ' -f1)
+    fi
+    bash "$SELF" --dry-run buttons >/dev/null 2>&1
+    local after_sum=""
+    if [ -f "$CSS3" ]; then
+        after_sum=$(md5sum "$CSS3" | cut -d' ' -f1)
+    fi
+    if [ "$before_sum" = "$after_sum" ]; then
+        t_ok "--dry-run не трогает файлы"
+    else
+        t_fail "--dry-run изменил gtk-3.0/gtk.css"
+    fi
+
+    # --- состояние файлов ---
+    if [ -L "$CSS4" ]; then
+        t_fail "~/.config/gtk-4.0/gtk.css это симлинк темы — правки уедут в тему"
+    else
+        t_ok "gtk-4.0/gtk.css не симлинк"
+    fi
+    for f in "$CSS3" "$CSS4"; do
+        if grep -q '!important' "$f" 2>/dev/null; then
+            t_fail "$(basename "$(dirname "$f")") содержит !important — GTK отбросит правила"
+        fi
+    done
+    t_ok "проверка на !important выполнена"
+
+    # --- обои ---
+    walldir=$(find_wallpaper_dir)
+    if [ -d "$walldir" ]; then
+        n=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+        if [ "$n" -gt 0 ]; then
+            t_ok "банк обоев: $n картинок"
+        else
+            t_fail "банк пуст: $walldir"
+        fi
+    else
+        t_skip "каталога обоев нет"
+    fi
+    res=$(detect_resolution)
+    if echo "$res" | grep -qE '^[0-9]+x[0-9]+$'; then
+        t_ok "разрешение определено: $res"
+    else
+        t_fail "разрешение не определилось"
+    fi
+
+    # --- сеть ---
+    if have curl; then
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+               "$WALLHAVEN?q=nature&categories=100&purity=100" 2>/dev/null)
+        if [ "$code" = "200" ]; then
+            t_ok "wallhaven отвечает"
+        else
+            t_skip "wallhaven недоступен (код $code) — пополнение банка не сработает"
+        fi
+        code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 20 \
+               "$FLUENT_ICONS/window-close-symbolic.svg" 2>/dev/null)
+        if [ "$code" = "200" ]; then
+            t_ok "значки Fluent доступны"
+        else
+            t_skip "значки Fluent недоступны (код $code)"
+        fi
+    fi
+
+    # --- кэш значков Chrome ---
+    favsrc="$HOME/.config/google-chrome/Default/Favicons"
+    if [ -f "$favsrc" ]; then
+        if have python3; then
+            n=$(python3 - "$favsrc" <<'PY' 2>/dev/null
+import sys, sqlite3, shutil, tempfile, os
+src = sys.argv[1]
+tmp = os.path.join(tempfile.gettempdir(), 'dk-fav-test')
+try:
+    shutil.copy(src, tmp)
+    cur = sqlite3.connect(tmp).cursor()
+    print(cur.execute('SELECT count(*) FROM favicon_bitmaps').fetchone()[0])
+except Exception:
+    print(0)
+PY
+)
+            if [ "${n:-0}" -gt 0 ]; then
+                t_ok "кэш значков Chrome читается: $n записей"
+            else
+                t_fail "кэш значков Chrome не читается"
+            fi
+        else
+            t_skip "python3 нет — кэш значков не проверить"
+        fi
+    else
+        t_skip "профиль Chrome не найден"
+    fi
+
+    # --- новая вкладка ---
+    if [ -f "$NEWTAB_LINKS" ]; then
+        local broken=$(grep -v '^#' "$NEWTAB_LINKS" | grep -v '^$' | grep -vc '|')
+        if [ "$broken" = "0" ]; then
+            t_ok "links.txt без битых строк"
+        else
+            t_fail "в links.txt строк без разделителя: $broken"
+        fi
+    else
+        t_skip "links.txt ещё нет"
+    fi
+
+    # --- systemd ---
+    if have systemctl; then
+        if systemctl --user is-system-running >/dev/null 2>&1; then
+            t_ok "пользовательский systemd работает"
+        else
+            t_skip "systemd --user не отвечает — расписание не поставить"
+        fi
+    fi
+
+    # --- полный режим ---
+    if [ "$full" = "1" ]; then
+        echo
+        head1 "самопроверка (полная: применение и откат)"
+        selftest_full
+    fi
+
+    # --- отчёт ---
+    echo
+    head1 "отчёт"
+    local finished=$(date '+%Y-%m-%d %H:%M:%S')
+
+    {
+        echo "# Самопроверка desktop-kit"
+        echo
+        echo "- версия: $VERSION"
+        echo "- начато:  $started"
+        echo "- закончено: $finished"
+        echo "- прошло проверок: $TEST_PASS"
+        echo "- провалено: $TEST_FAIL"
+        echo
+        echo '## Результаты'
+        echo
+        echo '```'
+        printf '%s\n' "$TEST_LOG"
+        echo '```'
+        echo
+        echo '## Состояние системы'
+        echo
+        echo '```'
+        bash "$SELF" status 2>&1
+        echo '```'
+    } > "$report_dir/selftest.md"
+
+    if [ -f "$LOG_FILE" ]; then
+        tail -200 "$LOG_FILE" > "$report_dir/desktop-kit.log"
+    fi
+    for f in "$CSS3" "$CSS4"; do
+        if [ -f "$f" ]; then
+            cp "$f" "$report_dir/$(basename "$(dirname "$f")")-gtk.css" 2>/dev/null
+        fi
+    done
+    if [ -f "$BEFORE" ]; then
+        cp "$BEFORE" "$report_dir/before.env"
+    fi
+
+    local archive="$HOME/desktop-kit-selftest.tar.gz"
+    rm -f "$archive"
+    tar -czf "$archive" -C "$HOME" "$(basename "$report_dir")" 2>/dev/null
+
+    ok "проверок пройдено: $TEST_PASS, провалено: $TEST_FAIL"
+    ok "отчёт:  $report_dir/selftest.md"
+    ok "архив:  $archive"
+    note "пришли архив — по нему видно всё состояние"
+
+    if [ "$TEST_FAIL" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+selftest_full() {
+    # каждая подсистема: применить, проверить след, откатить
+    local snapshot=$(mktemp)
+    gi_get gtk-theme > "$snapshot"
+    gi_get icon-theme >> "$snapshot"
+
+    bash "$SELF" buttons --size 40 30 --icon 18 >/dev/null 2>&1
+    if css_has buttons "$CSS3"; then
+        t_ok "buttons: правила записаны в gtk-3.0"
+    else
+        t_fail "buttons: правил в gtk-3.0 нет"
+    fi
+    if css_has buttons "$CSS4"; then
+        t_ok "buttons: правила записаны в gtk-4.0"
+    else
+        t_fail "buttons: правил в gtk-4.0 нет"
+    fi
+    if grep -q 'min-width: 40px' "$CSS4" 2>/dev/null; then
+        t_ok "buttons: размер применился"
+    else
+        t_fail "buttons: размер не применился"
+    fi
+    if grep -q '!important' "$CSS4" 2>/dev/null; then
+        t_fail "buttons: в правилах появился !important"
+    else
+        t_ok "buttons: !important не появился"
+    fi
+
+    bash "$SELF" corners --radius 8 >/dev/null 2>&1
+    if grep -q 'border-radius: 8px' "$CSS4" 2>/dev/null; then
+        t_ok "corners: радиус применился"
+    else
+        t_fail "corners: радиус не применился"
+    fi
+    if css_has buttons "$CSS4"; then
+        t_ok "corners: не затёр правила кнопок"
+    else
+        t_fail "corners: затёр правила кнопок"
+    fi
+
+    if [ -f "$CONKY_CONF" ]; then
+        bash "$SELF" widget --radius 14 >/dev/null 2>&1
+        if grep -q 'local RADIUS = 14' "$CONKY_LUA" 2>/dev/null; then
+            t_ok "widget: подложка нарисована"
+        else
+            t_fail "widget: подложка не создана"
+        fi
+    else
+        t_skip "widget: конфига conky нет"
+    fi
+
+    if [ -f "$NEWTAB_LINKS" ]; then
+        bash "$SELF" newtab >/dev/null 2>&1
+        if [ -f "$NEWTAB_DIR/index.html" ]; then
+            t_ok "newtab: страница собрана"
+        else
+            t_fail "newtab: страница не собралась"
+        fi
+    else
+        t_skip "newtab: списка ссылок нет"
+    fi
+
+    bash "$SELF" revert all >/dev/null 2>&1
+    if css_has buttons "$CSS3"; then
+        t_fail "revert: правила кнопок остались"
+    else
+        t_ok "revert: правила кнопок убраны"
+    fi
+    if css_has corners "$CSS4"; then
+        t_fail "revert: правила углов остались"
+    else
+        t_ok "revert: правила углов убраны"
+    fi
+    if [ "$(gi_get gtk-theme)" = "$(head -1 "$snapshot")" ]; then
+        t_ok "revert: тема окон вернулась"
+    else
+        t_fail "revert: тема окон не вернулась"
+    fi
+    rm -f "$snapshot"
+}
+
+# =====================================================================
+#  help и диспетчер
+# =====================================================================
+
+usage() {
+    cat <<EOF
+desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOME 46
+
+  $0 <команда> [параметры]
+
+ВНЕШНИЙ ВИД
+  buttons      кнопки заголовка: размер, значки, подсветка
+  corners      скругление углов окон
+  theme        тема оформления, цветовая схема
+  icons        тема значков, цвет папок
+  font         шрифт интерфейса и моноширинный
+  widget       виджет conky: скругление, цвет, плотность
+  terminal     GNOME Terminal: прозрачность, шрифт, палитра
+
+СОДЕРЖИМОЕ
+  newtab       страница новой вкладки Chrome и её ярлыки
+  wallpapers   банк обоев: пополнение, расписание, чистка
+  wall         сменить обои: следующие, предыдущие, случайные
+  serve        отдать локальную апку по http://localhost
+
+ПРОЧЕЕ
+  app          своя тема для одного приложения
+  audit        полный снимок системы в markdown
+  status       что сейчас применено
+  selftest     проверить себя на этой машине и собрать архив
+  revert       вернуть как было
+
+ГЛОБАЛЬНЫЕ ПАРАМЕТРЫ
+  --dry-run    рассказать, что было бы сделано, ничего не меняя
+  --yes        не переспрашивать
+  --quiet      без вывода, только лог
+
+  $0 help <команда>   подробности и все параметры
+
+Лог всех действий: $LOG_FILE
+EOF
+}
+
+cmd_help() {
+    local topic="${1:-}"
+    case "$topic" in
+        buttons)    help_buttons ;;
+        corners)    help_corners ;;
+        theme)      help_theme ;;
+        icons)      help_icons ;;
+        font)       help_font ;;
+        widget)     help_widget ;;
+        terminal)   help_terminal ;;
+        newtab)     help_newtab ;;
+        wallpapers) help_wallpapers ;;
+        wall)       help_wall ;;
+        app)        help_app ;;
+        serve)      help_serve ;;
+        selftest)   help_selftest ;;
+        revert)     help_revert ;;
+        "")         usage ;;
+        *)          echo "нет справки по '$topic'"; usage; return 1 ;;
+    esac
+}
+
+# глобальные флаги можно ставить где угодно
+ARGS=""
+for a in "$@"; do
+    case "$a" in
+        --dry-run) DRY_RUN=1 ;;
+        --yes)     ASSUME_YES=1 ;;
+        --quiet)   QUIET=1 ;;
+        *) ARGS="$ARGS
+$a" ;;
+    esac
+done
+
+set --
+while IFS= read -r a; do
+    if [ -n "$a" ]; then
+        set -- "$@" "$a"
+    fi
+done <<EOF
+$ARGS
+EOF
+
+COMMAND="${1:-}"
+if [ $# -gt 0 ]; then
+    shift
+fi
+
+log "запуск: $COMMAND $*"
+
+case "$COMMAND" in
+    buttons)    cmd_buttons "$@" ;;
+    corners)    cmd_corners "$@" ;;
+    theme)      cmd_theme "$@" ;;
+    icons)      cmd_icons "$@" ;;
+    font)       cmd_font "$@" ;;
+    widget)     cmd_widget "$@" ;;
+    terminal)   cmd_terminal "$@" ;;
+    newtab)     cmd_newtab "$@" ;;
+    wallpapers) cmd_wallpapers "$@" ;;
+    wall)       cmd_wall "$@" ;;
+    app)        cmd_app "$@" ;;
+    serve)      cmd_serve "$@" ;;
+    audit)      cmd_audit "$@" ;;
+    status)     cmd_status "$@" ;;
+    selftest)   cmd_selftest "$@" ;;
+    revert)     cmd_revert "$@" ;;
+    help)       cmd_help "$@" ;;
+    version|--version) echo "desktop-kit $VERSION" ;;
+    "")         usage ;;
+    *)
+        echo "неизвестная команда: $COMMAND"
+        echo
+        usage
+        exit 1
+        ;;
+esac
