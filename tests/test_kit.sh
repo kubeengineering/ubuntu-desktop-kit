@@ -55,6 +55,9 @@ export PATH="$T/bin:$PATH"
 
 # --- исходное состояние ----------------------------------------------
 mkdir -p "$HOME/.themes/Graphite-Dark/gtk-3.0" "$HOME/.themes/Yaru/gtk-3.0"
+# Yaru-dark нужен, чтобы скрипт мог понять: Yaru — это светлый вариант.
+# Без пары он отказывается гадать, и это правильно.
+mkdir -p "$HOME/.themes/Yaru-dark/gtk-3.0"
 echo "Name=Graphite-Dark" > "$HOME/.themes/Graphite-Dark/index.theme"
 echo "Name=Yaru" > "$HOME/.themes/Yaru/index.theme"
 echo "[Icon Theme]" > "$HOME/.local/share/icons/Papirus-Dark/index.theme"

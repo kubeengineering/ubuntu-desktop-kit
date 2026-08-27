@@ -293,6 +293,59 @@ css_strip() {
     fi
 }
 
+# Предшественники этого скрипта (look.sh, titlebuttons.sh) писали свои
+# правила блоком look-begin/look-end и заводили тему значков с суффиксом
+# -Fluent-Titlebar. Их надо уметь распознать: иначе в одном gtk.css
+# окажутся два набора правил для одних и тех же кнопок.
+LEGACY_CSS_MARK="look-begin"
+LEGACY_ICON_SUFFIX="-Fluent-Titlebar"
+
+has_legacy_css() {
+    local f
+    for f in "$CSS3" "$CSS4"; do
+        if [ -f "$f" ]; then
+            if grep -q "$LEGACY_CSS_MARK" "$f" 2>/dev/null; then
+                return 0
+            fi
+        fi
+    done
+    return 1
+}
+
+strip_legacy_css() {
+    local f
+    local n=0
+    for f in "$CSS3" "$CSS4"; do
+        if [ ! -f "$f" ]; then
+            continue
+        fi
+        if ! grep -q "$LEGACY_CSS_MARK" "$f" 2>/dev/null; then
+            continue
+        fi
+        backup_once "$f" "$(basename "$(dirname "$f")")-gtk.css"
+        sed -i '/look-begin/,/look-end/d' "$f"
+        ok "убран блок старого look.sh из $f"
+        n=$((n + 1))
+    done
+    if [ "$n" = "0" ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Базовая тема значков: снимаем и наш суффикс, и суффикс предшественника.
+icon_base_of() {
+    local name="$1"
+    case "$name" in
+        *-dk-glyphs)          printf '%s
+' "${name%-dk-glyphs}" ;;
+        *"$LEGACY_ICON_SUFFIX") printf '%s
+' "${name%$LEGACY_ICON_SUFFIX}" ;;
+        *)                    printf '%s
+' "$name" ;;
+    esac
+}
+
 css_append() {
     local tag="$1"
     local file="$2"
@@ -521,6 +574,17 @@ cmd_buttons() {
         fi
     fi
 
+    # Пока в файле лежат правила предшественника, наши будут спорить с ними
+    # за те же селекторы — снимаем их до записи.
+    if has_legacy_css; then
+        note "в gtk.css найдены правила старого look.sh"
+        if confirm "убрать их? (иначе два набора правил будут спорить)"; then
+            strip_legacy_css
+        else
+            note "оставляю; учти, что вид может получиться смешанным"
+        fi
+    fi
+
     untangle_gtk3
     backup_once "$CSS3" "gtk-3.0-gtk.css"
     untangle_gtk4
@@ -695,9 +759,10 @@ darken_hex() {
 # Papirus не содержит window-*-symbolic — GNOME подставляет Adwaita.
 # Поэтому значки кладём в тему-наследник поверх текущей.
 install_fluent_glyphs() {
-    local cur=$(gi_get icon-theme)
-    local base="$cur"
-    case "$cur" in *-dk-glyphs) base="${cur%-dk-glyphs}" ;; esac
+    local cur
+    cur=$(gi_get icon-theme)
+    local base
+    base=$(icon_base_of "$cur")
     if [ -z "$base" ]; then
         base="Adwaita"
     fi
@@ -973,53 +1038,180 @@ theme_exists_ci() {
     return 1
 }
 
+# Слово-вариант может стоять НЕ в конце имени: у vinceliuice это
+# Graphite-Dark-Square, Graphite-Light-nord, Colloid-Dark-Catppuccin.
+# Поэтому имя разбираем по дефисам и ищем вариантное слово где угодно.
+THEME_DARK_WORDS="darker dark black"
+THEME_LIGHT_WORDS="lighter light white"
+
+# Номер токена со словом варианта (считая с 1), пусто — слова нет.
+# Разбираем через cut, а не через IFS='-': смена IFS меняет разбиение
+# ВСЕГО внутри блока, и список слов "darker dark black" тогда становится
+# одним словом. На этом уже обожглись.
+theme_tokens() {
+    printf '%s' "$1" | awk -F- '{print NF}'
+}
+
+theme_token() {
+    printf '%s' "$1" | cut -d- -f"$2"
+}
+
+theme_variant_pos() {
+    local name="$1"
+    local n
+    n=$(theme_tokens "$name")
+    local i=1
+    local low
+    local w
+    while [ "$i" -le "$n" ]; do
+        low=$(lower "$(theme_token "$name" "$i")")
+        for w in $THEME_DARK_WORDS $THEME_LIGHT_WORDS; do
+            if [ "$low" = "$w" ]; then
+                printf '%s
+' "$i"
+                return 0
+            fi
+        done
+        i=$((i + 1))
+    done
+    return 1
+}
+
 # Светлая тема, тёмная или по имени не понять.
 theme_variant_of() {
     local name="$1"
-    local s
-    for s in $THEME_DARK_SUFFIXES; do
-        case "$name" in *"$s") echo "dark"; return 0 ;; esac
+    local pos
+    pos=$(theme_variant_pos "$name")
+    if [ -z "$pos" ]; then
+        echo "unknown"
+        return 0
+    fi
+    local tok
+    tok=$(lower "$(theme_token "$name" "$pos")")
+    local w
+    for w in $THEME_DARK_WORDS; do
+        if [ "$tok" = "$w" ]; then
+            echo "dark"
+            return 0
+        fi
     done
-    for s in $THEME_LIGHT_SUFFIXES; do
-        case "$name" in *"$s") echo "light"; return 0 ;; esac
-    done
-    echo "unknown"
+    echo "light"
 }
 
-# Имя без суффикса варианта: Graphite-teal-Dark -> Graphite-teal
+# Собрать имя обратно, заменив или выбросив токен номер $2.
+# $3 — новое слово; пустое означает «выбросить токен».
+theme_rebuild() {
+    local name="$1"
+    local pos="$2"
+    local word="${3:-}"
+    local n
+    n=$(theme_tokens "$name")
+    local i=1
+    local out=""
+    local tok
+    while [ "$i" -le "$n" ]; do
+        tok=$(theme_token "$name" "$i")
+        if [ "$i" = "$pos" ]; then
+            if [ -z "$word" ]; then
+                i=$((i + 1))
+                continue
+            fi
+            tok="$word"
+        fi
+        if [ -z "$out" ]; then
+            out="$tok"
+        else
+            out="$out-$tok"
+        fi
+        i=$((i + 1))
+    done
+    printf '%s
+' "$out"
+}
+
+# Имя без слова варианта: Graphite-Dark-Square -> Graphite-Square,
+# Graphite-teal-Dark -> Graphite-teal, Yaru-dark -> Yaru.
 theme_base_of() {
     local name="$1"
-    local s
-    for s in $THEME_DARK_SUFFIXES $THEME_LIGHT_SUFFIXES; do
-        case "$name" in *"$s") echo "${name%$s}"; return 0 ;; esac
-    done
-    echo "$name"
+    local pos
+    pos=$(theme_variant_pos "$name")
+    if [ -z "$pos" ]; then
+        printf '%s
+' "$name"
+        return 0
+    fi
+    theme_rebuild "$name" "$pos" ""
 }
 
-# Найти среди УСТАНОВЛЕННЫХ тем вариант нужной яркости для этой базы.
-theme_find_variant() {
-    local base="$1"
-    local want="$2"
-    local sufs
-    local s
-    if [ "$want" = "dark" ]; then
-        sufs="$THEME_DARK_SUFFIXES"
-    else
-        sufs="$THEME_LIGHT_SUFFIXES"
+# Подставить другое слово варианта, сохранив всё остальное:
+# Graphite-Dark-Square + Light -> Graphite-Light-Square
+theme_swap_variant() {
+    local name="$1"
+    local word="$2"
+    local pos
+    pos=$(theme_variant_pos "$name")
+    if [ -z "$pos" ]; then
+        return 1
     fi
-    for s in $sufs; do
-        if theme_exists "$base$s"; then
-            echo "$base$s"
+    theme_rebuild "$name" "$pos" "$word"
+}
+
+# Найти среди УСТАНОВЛЕННЫХ тем вариант нужной яркости.
+theme_find_variant() {
+    local name="$1"
+    local want="$2"
+    local words
+    local w
+    local cand
+    if [ "$want" = "dark" ]; then
+        words="Dark dark DARK Darker darker Black black"
+    else
+        words="Light light LIGHT Lighter lighter White white"
+    fi
+
+    # 1. Имя со словом варианта: меняем слово на месте, где бы оно ни было.
+    if theme_variant_pos "$name" >/dev/null 2>&1; then
+        for w in $words; do
+            cand=$(theme_swap_variant "$name" "$w")
+            if theme_exists "$cand"; then
+                printf '%s
+' "$cand"
+                return 0
+            fi
+        done
+        # 2. Светлый вариант часто зовётся просто базой: Yaru-dark -> Yaru
+        if [ "$want" = "light" ]; then
+            cand=$(theme_base_of "$name")
+            if theme_exists "$cand"; then
+                printf '%s
+' "$cand"
+                return 0
+            fi
+        fi
+        return 1
+    fi
+
+    # 3. Слова варианта в имени нет — дописываем суффикс к самому имени.
+    for w in $words; do
+        cand="$name-$w"
+        if theme_exists "$cand"; then
+            printf '%s
+' "$cand"
             return 0
         fi
     done
-    # У части тем светлый вариант — это имя БЕЗ суффикса: Yaru против
-    # Yaru-dark, Adwaita против Adwaita-dark. Для тёмного так не бывает.
+
+    # 4. Имя без слова варианта, у которого есть тёмный собрат, само и
+    #    есть светлый вариант: Yaru против Yaru-dark, Adwaita против
+    #    Adwaita-dark. Тогда переключать нечего, но схему сменить надо.
     if [ "$want" = "light" ]; then
-        if theme_exists "$base"; then
-            echo "$base"
-            return 0
-        fi
+        for w in Dark dark DARK Darker darker; do
+            if theme_exists "$name-$w"; then
+                printf '%s
+' "$name"
+                return 0
+            fi
+        done
     fi
     return 1
 }
@@ -1079,10 +1271,21 @@ theme_switch_variant() {
     have=$(theme_variant_of "$cur")
     base=$(theme_base_of "$cur")
 
-    found=$(theme_find_variant "$base" "$want")
+    found=$(theme_find_variant "$cur" "$want")
     if [ -n "$found" ]; then
+        # Найденное имя может совпасть с текущим только если тема уже
+        # нужной яркости. Совпадение при ДРУГОЙ яркости — признак того,
+        # что слово варианта в имени не распознано: молчать тут нельзя.
         if [ "$found" = "$cur" ]; then
-            note "$cur уже подходит — это и есть вариант нужной яркости"
+            if [ "$have" = "$want" ]; then
+                note "$cur уже подходит — это и есть вариант нужной яркости"
+            else
+                bad "парного варианта для '$cur' не нашлось"
+                note "в имени темы не распознано слово light или dark"
+                note "выбери руками из установленных:"
+                theme_list_variants "$want" | dump
+                return 1
+            fi
         else
             note "$cur -> $found"
         fi
@@ -1234,6 +1437,32 @@ cmd_theme() {
             else
                 dconf write /org/gnome/shell/extensions/user-theme/name "'$wanted'" 2>/dev/null
                 ok "тема оболочки: $wanted"
+            fi
+        else
+            # У темы нет каталога gnome-shell. Если оболочка при этом одета
+            # в ДРУГУЮ тему, она останется прежней яркости — верхняя панель
+            # будет тёмной при светлых окнах, и это выглядит как поломка.
+            local shell_now
+            shell_now=$(dconf read /org/gnome/shell/extensions/user-theme/name 2>/dev/null | tr -d "'")
+            if [ -n "$shell_now" ]; then
+                if [ "$shell_now" != "$wanted" ]; then
+                    local shell_variant
+                    shell_variant=$(theme_variant_of "$shell_now")
+                    local want_variant
+                    want_variant=$(theme_variant_of "$wanted")
+                    if [ "$shell_variant" != "$want_variant" ]; then
+                        bad "оболочка одета в '$shell_now' — другой яркости"
+                        note "у темы '$wanted' нет каталога gnome-shell, менять нечего"
+                        local shell_pair
+                        shell_pair=$(theme_find_variant "$shell_now" "$want_variant")
+                        if [ -n "$shell_pair" ]; then
+                            local q
+                            q=$(printf "\047")
+                            note "поправить вручную:"
+                            note "  dconf write /org/gnome/shell/extensions/user-theme/name \"$q$shell_pair$q\""
+                        fi
+                    fi
+                fi
             fi
         fi
 
@@ -1438,8 +1667,7 @@ cmd_icons() {
             note "sudo apt install papirus-folders"
             return 1
         fi
-        base=$(gi_get icon-theme)
-        case "$base" in *-dk-glyphs) base="${base%-dk-glyphs}" ;; esac
+        base=$(icon_base_of "$(gi_get icon-theme)")
         case "$base" in
             Papirus*) : ;;
             *)
@@ -1482,11 +1710,11 @@ cmd_icons() {
         local cur_icon_theme
         cur_icon_theme=$(gi_get icon-theme)
         case "$cur_icon_theme" in
-            *-dk-glyphs)
+            *-dk-glyphs|*-Fluent-Titlebar)
                 had_glyphs=1
                 # Запоминать наследника нельзя: откат вернул бы тему, каталог
                 # которой к тому моменту уже удалён. Помним его базу.
-                cur_icon_theme="${cur_icon_theme%-dk-glyphs}"
+                cur_icon_theme=$(icon_base_of "$cur_icon_theme")
                 ;;
         esac
 
@@ -3145,6 +3373,11 @@ cmd_status() {
         fi
         if grep -q '!important' "$f" 2>/dev/null; then
             bad "$label: содержит !important — GTK отбросит эти правила целиком"
+            grep -n '!important' "$f" | head -3 | dump
+        fi
+        if grep -q "$LEGACY_CSS_MARK" "$f" 2>/dev/null; then
+            bad "$label: остались правила старого look.sh"
+            note "они будут спорить с нашими; снимутся при следующем buttons"
         fi
     done
 
@@ -3447,12 +3680,15 @@ cmd_revert() {
         local cur_icon
         cur_icon=$(gi_get icon-theme)
         case "$cur_icon" in
-            *-dk-glyphs)
-                gi_set icon-theme "${cur_icon%-dk-glyphs}"
+            *-dk-glyphs|*-Fluent-Titlebar)
+                gi_set icon-theme "$(icon_base_of "$cur_icon")"
                 rm -rf "$HOME/.local/share/icons/$cur_icon"
                 ok "наследник со значками заголовка удалён"
                 ;;
         esac
+        if has_legacy_css; then
+            strip_legacy_css
+        fi
 
         revert_gi_keys "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
                        "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name" \
@@ -3495,13 +3731,13 @@ cmd_revert() {
                 local cur_icon
                 cur_icon=$(gi_get icon-theme)
                 case "$cur_icon" in
-                    *-dk-glyphs)
+                    *-dk-glyphs|*-Fluent-Titlebar)
                         # База зашита в самом имени наследника — это точнее,
                         # чем запомненное значение: тему значков мог поменять
                         # icons уже ПОСЛЕ установки кнопок.
-                        gi_set icon-theme "${cur_icon%-dk-glyphs}"
+                        gi_set icon-theme "$(icon_base_of "$cur_icon")"
                         rm -rf "$HOME/.local/share/icons/$cur_icon"
-                        ok "тема значков: ${cur_icon%-dk-glyphs}"
+                        ok "тема значков: $(icon_base_of "$cur_icon")"
                         ;;
                 esac
             fi
@@ -3531,7 +3767,7 @@ cmd_revert() {
             local cur_ico
             cur_ico=$(gi_get icon-theme)
             case "$cur_ico" in
-                *-dk-glyphs)
+                *-dk-glyphs|*-Fluent-Titlebar)
                     rm -rf "$HOME/.local/share/icons/$cur_ico"
                     ok "наследник со значками заголовка удалён"
                     ;;
@@ -4163,7 +4399,8 @@ exit 0'
 
     # темы: пара вариантов и одиночка
     local th
-    for th in Graphite-Dark Graphite-Light Yaru Yaru-dark Loner-Dark; do
+    for th in Graphite-Dark Graphite-Light Yaru Yaru-dark Loner-Dark \
+              Graphite-Dark-Square Graphite-Light-Square; do
         mkdir -p "$SB/.themes/$th/gtk-3.0"
     done
     mkdir -p "$SB/.themes/Graphite-Light/gnome-shell"
@@ -4525,6 +4762,14 @@ cmd_selftest() {
     done
     t_ok "проверка на !important выполнена"
 
+    if has_legacy_css; then
+        t_fail "в gtk.css остались правила старого look.sh"
+        t_detail "они спорят с правилами desktop-kit за те же селекторы"
+        t_detail "снимутся при следующем запуске buttons (спросит подтверждение)"
+    else
+        t_ok "правил предшественника в gtk.css нет"
+    fi
+
     # --- разбор имён тем: чистая логика, ничего не меняет ---
     local vcase
     local vgot
@@ -4561,8 +4806,8 @@ cmd_selftest() {
     local pair_dark
     cur_theme=$(gi_get gtk-theme)
     cur_variant=$(theme_variant_of "$cur_theme")
-    pair_light=$(theme_find_variant "$(theme_base_of "$cur_theme")" light)
-    pair_dark=$(theme_find_variant "$(theme_base_of "$cur_theme")" dark)
+    pair_light=$(theme_find_variant "$cur_theme" light)
+    pair_dark=$(theme_find_variant "$cur_theme" dark)
     t_ok "тема сейчас: $cur_theme (по имени — $cur_variant)"
     if [ -n "$pair_light" ]; then
         t_ok "светлый вариант есть: $pair_light  ->  $0 theme --light"
@@ -4931,6 +5176,27 @@ st_buttons() {
         "$(sb_get org.gnome.desktop.interface icon-theme)"
     t_nofile "нет двойного наследника" "$SB/.local/share/icons/Adwaita-dk-glyphs-dk-glyphs"
 
+    # правила предшественника не должны сосуществовать с нашими
+    sandbox_drop
+    sandbox_new
+    printf '/* чужое правило */\nwindow { color: red; }\n/* look-begin */\nbutton.titlebutton { min-width: 46px; }\n/* look-end */\n' \
+        > "$SB/.config/gtk-3.0/gtk.css"
+    sandbox_run buttons
+    t_hasnt "блок старого look.sh убран" "$SB/.config/gtk-3.0/gtk.css" "look-begin"
+    t_has "чужое правило при этом уцелело" "$SB/.config/gtk-3.0/gtk.css" "чужое правило"
+    t_has "наш блок записан" "$SB/.config/gtk-3.0/gtk.css" "dk:buttons-begin"
+    t_out_has "про старые правила сказано вслух" "look.sh"
+
+    # тема значков от предшественника тоже должна распознаваться
+    sandbox_drop
+    sandbox_new
+    mkdir -p "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar"
+    printf '[Icon Theme]\nName=x\n' > "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar/index.theme"
+    sb_set org.gnome.desktop.interface icon-theme "Papirus-Dark-Fluent-Titlebar"
+    sandbox_run revert buttons
+    t_eq "наследник предшественника снят до базы" "Papirus-Dark" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+
     # gtk-4.0/gtk.css как симлинк в тему — ссылку надо снять
     sandbox_drop
     sandbox_new
@@ -4986,7 +5252,9 @@ st_theme() {
     local vbad=0
     for vcase in "Graphite-Dark:dark:Graphite" "Graphite-Light:light:Graphite" \
                  "Yaru-dark:dark:Yaru" "Graphite-teal-Dark:dark:Graphite-teal" \
-                 "WhiteSur-Darker:dark:WhiteSur" "Adwaita:unknown:Adwaita"; do
+                 "WhiteSur-Darker:dark:WhiteSur" "Adwaita:unknown:Adwaita" \
+                 "Graphite-Dark-Square:dark:Graphite-Square" \
+                 "Colloid-Dark-Catppuccin:dark:Colloid-Catppuccin"; do
         nm="${vcase%%:*}"
         rest="${vcase#*:}"
         want_v="${rest%%:*}"
@@ -5005,8 +5273,30 @@ st_theme() {
         fi
     done
     if [ "$vbad" = "0" ]; then
-        t_ok "имена тем разбираются верно (6 форм)"
+        t_ok "имена тем разбираются верно (8 форм)"
     fi
+
+    # Вариант в середине имени — это не выдумка: ровно так называются темы
+    # vinceliuice, и на живой машине переключатель предлагал САМУ ЖЕ тёмную
+    # тему как светлую.
+    sb_set org.gnome.desktop.interface gtk-theme "Graphite-Dark-Square"
+    sandbox_run theme --light
+    t_eq "вариант в середине имени: Dark-Square -> Light-Square" \
+        "Graphite-Light-Square" "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    sandbox_run theme --dark
+    t_eq "и обратно" "Graphite-Dark-Square" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # слово варианта в имени есть, а пары нет — нельзя выдавать саму себя
+    sb_set org.gnome.desktop.interface gtk-theme "Loner-Dark"
+    sandbox_run theme --light
+    t_rc_not "не выдаёт тёмную тему за светлый вариант"
+    t_eq "тема осталась тёмной" "Loner-Dark" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # вернуть исходное состояние для следующих проверок
+    sb_set org.gnome.desktop.interface gtk-theme "Graphite-Dark"
+    sb_set org.gnome.desktop.interface color-scheme "prefer-dark"
 
     # переключение на светлую без знания имени
     sandbox_run theme --light
