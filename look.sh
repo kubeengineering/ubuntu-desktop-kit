@@ -7,6 +7,9 @@
 #   ./look.sh --font "JetBrainsMono Nerd Font 11"   шрифт интерфейса
 #   ./look.sh --widget 18         скруглить виджет conky на 18px
 #   ./look.sh --window-radius 6   скругление углов окон, 0 = острые
+#   ./look.sh --selftest          ПРОВЕРКА: кнопки станут ярко-зелёными.
+#                                 Не позеленели — css не читается вовсе,
+#                                 и дело не в селекторах
 #   ./look.sh --no-import         не подключать тему в GTK4 (если правила
 #                                 не применяются — виноват может быть импорт)
 #   ./look.sh --check             что сейчас применено
@@ -46,6 +49,7 @@ BTN_W=46
 BTN_H=34
 BTN_ICO=24
 DO_CORNERS=1
+SELFTEST=0
 NO_IMPORT=0
 WIN_RADIUS=0
 FONT=""
@@ -60,6 +64,7 @@ while [ $# -gt 0 ]; do
         --widget)     WIDGET="${2:-18}"; shift 2 ;;
         --window-radius) WIN_RADIUS="${2:-0}"; shift 2 ;;
         --no-import)  NO_IMPORT=1; shift ;;
+        --selftest)   SELFTEST=1; shift ;;
         --check)      MODE="check"; shift ;;
         --revert)     MODE="revert"; shift ;;
         -h|--help)    sed -n '2,9p' "$0" | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -175,6 +180,8 @@ if [ "$MODE" = "revert" ]; then
         ok "~/.config/gtk-4.0/gtk.css восстановлен"
     elif [ -f "$USER_CSS4" ]; then
         sed -i '/squarebuttons-begin/,/squarebuttons-end/d' "$USER_CSS4"
+        sed -i '/selftest-begin/,/selftest-end/d' "$USER_CSS4"
+sed -i '/selftest-begin/,/selftest-end/d' "$USER_CSS4"
         if [ ! -s "$USER_CSS4" ]; then
             rm -f "$USER_CSS4"
         fi
@@ -439,6 +446,7 @@ if [ -L "$USER_CSS4" ]; then
 fi
 touch "$USER_CSS4"
 sed -i '/squarebuttons-begin/,/squarebuttons-end/d' "$USER_CSS4"
+sed -i '/selftest-begin/,/selftest-end/d' "$USER_CSS4"
 
 if [ "$NO_IMPORT" = "1" ]; then
     IMPORT_LINE=""
@@ -713,6 +721,33 @@ LUAEOF
 
         restart_conky
     fi
+fi
+
+
+# --- самотест ---------------------------------------------------------
+if [ "$SELFTEST" = "1" ]; then
+    echo "==> самотест"
+    for F in "$THEME_DIR/gtk-3.0/gtk.css" "$USER_CSS4"; do
+        cat >> "$F" <<'TESTEOF'
+
+/* selftest-begin — временный маркер, убирается повторным запуском */
+windowcontrols > button > image,
+windowcontrols button image,
+headerbar button.titlebutton image,
+button.titlebutton image {
+  background-color: #00ff00 !important;
+  border-radius: 0 !important;
+}
+/* selftest-end */
+TESTEOF
+    done
+    ok "маркер записан в обе цели"
+    echo
+    echo "  Посмотри на кнопки заголовка в папке и терминале:"
+    echo "    ЯРКО-ЗЕЛЁНЫЕ  — css читается, дело было в селекторах"
+    echo "    без изменений — css не читается вовсе, искать надо не здесь"
+    echo
+    echo "  убрать маркер: $0 (обычный запуск)"
 fi
 
 # --- 5. переключаемся -------------------------------------------------
