@@ -213,7 +213,25 @@ restore_backup() {
     if [ -f "$src" ]; then
         local cleaned
         cleaned=$(mktemp)
+        if [ -z "$cleaned" ]; then
+            bad "не удалось создать временный файл — откат $src отменён"
+            return 1
+        fi
         sed '/dk:[a-z]*-begin/,/dk:[a-z]*-end/d' "$src" > "$cleaned"
+        # Пустой результат при непустом исходнике означает, что sed съел
+        # больше, чем должен: подменять файл в этом случае нельзя.
+        if [ -s "$src" ]; then
+            if [ ! -s "$cleaned" ]; then
+                if grep -q 'dk:' "$src"; then
+                    : # файл целиком состоял из наших блоков, это нормально
+                else
+                    bad "после снятия наших правил от $src ничего не осталось"
+                    note "файл не трогаю, разберись руками"
+                    rm -f "$cleaned"
+                    return 1
+                fi
+            fi
+        fi
         # пустые строки на стыке блоков разницей не считаем
         if diff -q -B "$cleaned" "$dst" >/dev/null 2>&1; then
             rm -f "$cleaned"
@@ -309,6 +327,13 @@ recall() {
 css_strip() {
     local tag="$1"
     local file="$2"
+    # sed -i по симлинку подменяет саму ссылку обычным файлом. Для gtk.css
+    # это значит, что правки уедут внутрь каталога темы.
+    if [ -L "$file" ]; then
+        bad "$file — симлинк, правила из него не снимаю"
+        note "цель: $(readlink -f "$file")"
+        return 1
+    fi
     if [ -f "$file" ]; then
         sed -i "/dk:$tag-begin/,/dk:$tag-end/d" "$file"
     fi
@@ -334,8 +359,18 @@ has_legacy_css() {
 }
 
 strip_legacy_css() {
+    # В режиме проверки не трогаем ничего: раньше --dry-run вырезал блоки
+    # предшественника по-настоящему, да ещё и без резервной копии.
+    if [ "$DRY_RUN" = "1" ]; then
+        note "(проверка) убрали бы правила старого look.sh"
+        return 0
+    fi
     local f
     local n=0
+    local nb
+    local ne
+    local lb
+    local le
     for f in "$CSS3" "$CSS4"; do
         if [ ! -f "$f" ]; then
             continue
@@ -343,6 +378,26 @@ strip_legacy_css() {
         if ! grep -q "$LEGACY_CSS_MARK" "$f" 2>/dev/null; then
             continue
         fi
+
+        # sed с диапазоном при отсутствии закрывающего маркера удаляет файл
+        # от начала блока И ДО КОНЦА. Поэтому сначала убеждаемся, что
+        # маркеры парные и идут в правильном порядке.
+        nb=$(grep -c 'look-begin' "$f")
+        ne=$(grep -c 'look-end' "$f")
+        if [ "$nb" != "$ne" ]; then
+            bad "в $f маркеры look-begin и look-end не парные ($nb и $ne)"
+            note "не трогаю: вырезание съело бы файл до конца"
+            note "поправь блок руками, потом повтори команду"
+            continue
+        fi
+        lb=$(grep -n 'look-begin' "$f" | head -1 | cut -d: -f1)
+        le=$(grep -n 'look-end' "$f" | head -1 | cut -d: -f1)
+        if [ "$lb" -gt "$le" ]; then
+            bad "в $f look-end встречается раньше look-begin"
+            note "не трогаю, поправь руками"
+            continue
+        fi
+
         backup_once "$f" "$(basename "$(dirname "$f")")-gtk.css"
         sed -i '/look-begin/,/look-end/d' "$f"
         ok "убран блок старого look.sh из $f"
@@ -854,9 +909,14 @@ EOF
     if have gtk-update-icon-cache; then
         gtk-update-icon-cache -f "$dir" >/dev/null 2>&1
     fi
-    # ICON_THEME принадлежит команде icons. Для кнопок база восстанавливается
-    # отсечением суффикса -dk-glyphs, и запоминать её отдельно не нужно:
-    # так откат кнопок не сбрасывает тему значков, выбранную позже.
+    # ICON_THEME принадлежит команде icons. Кнопки помнят СВОЁ: точное имя
+    # темы, которая стояла до них. Выводить его из имени наследника нельзя —
+    # у темы предшественника (X-Fluent-Titlebar) база X, и откат вернул бы
+    # не то, что было.
+    case "$cur" in
+        *-dk-glyphs) : ;;
+        *) state_set BTN_PREV_ICON "$cur" ;;
+    esac
     gi_set icon-theme "$theme"
     ok "значки Fluent поверх $base"
     return 0
@@ -1203,6 +1263,11 @@ theme_find_variant() {
     if [ -z "$name" ]; then
         return 1
     fi
+    # Всё, что не dark и не light, раньше молча считалось светлым.
+    case "$want" in
+        dark|light) : ;;
+        *) return 1 ;;
+    esac
     local words
     local w
     local cand
@@ -1222,13 +1287,17 @@ theme_find_variant() {
                 return 0
             fi
         done
-        # 2. Светлый вариант часто зовётся просто базой: Yaru-dark -> Yaru
+        # 2. Светлый вариант часто зовётся просто базой: Yaru-dark -> Yaru.
+        #    Но база сама может оказаться тёмной темой без подписи, поэтому
+        #    засчитываем её, только если у неё есть тёмный собрат.
         if [ "$want" = "light" ]; then
             cand=$(theme_base_of "$name")
             if theme_exists "$cand"; then
-                printf '%s
+                if theme_has_dark_sibling "$cand"; then
+                    printf '%s
 ' "$cand"
-                return 0
+                    return 0
+                fi
             fi
         fi
         return 1
@@ -1248,23 +1317,59 @@ theme_find_variant() {
     #    есть светлый вариант: Yaru против Yaru-dark, Adwaita против
     #    Adwaita-dark. Тогда переключать нечего, но схему сменить надо.
     if [ "$want" = "light" ]; then
-        for w in Dark dark DARK Darker darker; do
-            if theme_exists "$name-$w"; then
-                printf '%s
+        if theme_has_dark_sibling "$name"; then
+            printf '%s
 ' "$name"
-                return 0
-            fi
-        done
+            return 0
+        fi
     fi
+    return 1
+}
+
+# Есть ли у темы с таким именем тёмный собрат — то есть является ли она
+# сама светлой половиной пары.
+# «да», если тема без слова варианта в имени доказуемо светлая: у неё есть
+# тёмный собрат. Вынесено в функцию, чтобы не писать цепочку из && .
+theme_light_by_sibling() {
+    local have="$1"
+    local want="$2"
+    local name="$3"
+    if [ "$have" != "unknown" ]; then
+        echo "нет"
+        return 0
+    fi
+    if [ "$want" != "light" ]; then
+        echo "нет"
+        return 0
+    fi
+    if theme_has_dark_sibling "$name"; then
+        echo "да"
+        return 0
+    fi
+    echo "нет"
+}
+
+theme_has_dark_sibling() {
+    local name="$1"
+    local w
+    for w in Dark dark DARK Darker darker Black black; do
+        if theme_exists "$name-$w"; then
+            return 0
+        fi
+    done
     return 1
 }
 
 # Установленные темы нужной яркости — для подсказки, когда пары не нашлось.
 theme_list_variants() {
     local want="$1"
+    local skip="${2:-}"
     local t
     local v
     list_themes | while read -r t; do
+        if [ "$t" = "$skip" ]; then
+            continue
+        fi
         v=$(theme_variant_of "$t")
         if [ "$v" = "$want" ]; then
             echo "$t"
@@ -1322,11 +1427,18 @@ theme_switch_variant() {
         if [ "$found" = "$cur" ]; then
             if [ "$have" = "$want" ]; then
                 note "$cur уже подходит — это и есть вариант нужной яркости"
+            elif [ "$(theme_light_by_sibling "$have" "$want" "$cur")" = "да" ]; then
+                # Стоковая Ubuntu: тема называется Yaru, а тёмная — Yaru-dark.
+                # Слова варианта в имени нет, но тёмный собрат доказывает,
+                # что текущая тема и есть светлая. Менять тему нечего, схему
+                # надо. Раньше этот путь заканчивался отказом, то есть
+                # theme --light на стоковой системе не работал вообще.
+                note "$cur и есть светлый вариант — тёмный лежит отдельно"
             else
                 bad "парного варианта для '$cur' не нашлось"
                 note "в имени темы не распознано слово light или dark"
                 note "выбери руками из установленных:"
-                theme_list_variants "$want" | dump
+                theme_list_variants "$want" "$cur" | dump
                 return 1
             fi
         else
@@ -1346,7 +1458,7 @@ theme_switch_variant() {
         note "  $0 theme --install $base$suffix"
     fi
     note "или возьми любую из установленных:"
-    theme_list_variants "$want" | dump
+    theme_list_variants "$want" "$cur" | dump
     note "если нужно поменять только схему для GTK4-приложений:"
     note "  $0 theme $flag --scheme-only"
     return 1
@@ -1493,7 +1605,17 @@ cmd_theme() {
                     shell_variant=$(theme_variant_of "$shell_now")
                     local want_variant
                     want_variant=$(theme_variant_of "$wanted")
-                    if [ "$shell_variant" != "$want_variant" ]; then
+                    local both_known=1
+                    if [ "$shell_variant" = "unknown" ]; then
+                        both_known=0
+                    fi
+                    if [ "$want_variant" = "unknown" ]; then
+                        both_known=0
+                    fi
+                    if [ "$shell_variant" = "$want_variant" ]; then
+                        both_known=0
+                    fi
+                    if [ "$both_known" = "1" ]; then
                         bad "оболочка одета в '$shell_now' — другой яркости"
                         note "у темы '$wanted' нет каталога gnome-shell, менять нечего"
                         local shell_pair
@@ -3499,7 +3621,9 @@ revert — вернуть как было
   desktop-kit revert --list       что вообще можно откатить и что запомнено
 
   По подсистемам:
-    app        свои ярлыки приложений с подменённой темой
+    app        свои ярлыки приложений — ТОЛЬКО помеченные нами; ярлык,
+               который ты сделал сам или прежний evolution-light.sh,
+               откат не трогает
     keys       горячие клавиши, заведённые этим скриптом
     serve      службы локальных апок
     buttons    значки заголовка и их подсветка
@@ -3566,6 +3690,12 @@ revert_terminal() {
 revert_panel() {
     local dtp_o
     local dtp_s
+    local dtp_c
+    dtp_c=$(recall DTP_CUSTOM)
+    if [ -n "$dtp_c" ]; then
+        dconf write $DTP/trans-use-custom-opacity "$dtp_c" 2>/dev/null
+        ok "своя прозрачность панели: $dtp_c"
+    fi
     dtp_o=$(recall DTP_OPACITY)
     if [ -n "$dtp_o" ]; then
         dconf write $DTP/trans-panel-opacity "$dtp_o" 2>/dev/null
@@ -3728,6 +3858,10 @@ cmd_revert() {
     fi
 
     if [ "$what" = "all" ]; then
+        if [ ! -f "$BEFORE" ]; then
+            note "снимка исходных настроек нет — команды ещё не запускались"
+            note "верну только то, что видно по файлам: блоки правил и копии"
+        fi
         for tag in buttons corners; do
             css_strip "$tag" "$CSS3"
             css_strip "$tag" "$CSS4"
@@ -3740,14 +3874,28 @@ cmd_revert() {
         local cur_icon
         cur_icon=$(gi_get icon-theme)
         case "$cur_icon" in
-            *-dk-glyphs|*-Fluent-Titlebar)
-                gi_set icon-theme "$(icon_base_of "$cur_icon")"
+            *-dk-glyphs)
+                local back_icon
+                back_icon=$(state_get BTN_PREV_ICON)
+                if [ -z "$back_icon" ]; then
+                    back_icon=$(icon_base_of "$cur_icon")
+                fi
+                gi_set icon-theme "$back_icon"
                 rm -rf "$HOME/.local/share/icons/$cur_icon"
                 ok "наследник со значками заголовка удалён"
                 ;;
+            *-Fluent-Titlebar)
+                # Этот каталог создал предшественник, не мы. Возвращаем
+                # базовую тему, но чужое с диска не сносим.
+                gi_set icon-theme "$(icon_base_of "$cur_icon")"
+                note "каталог '$cur_icon' от старого скрипта оставлен на диске"
+                note "убрать при желании: rm -rf ~/.local/share/icons/$cur_icon"
+                ;;
         esac
+        # Правила предшественника снимает только buttons, и только спросив.
+        # Откат чужое не трогает: человек мог ответить «нет» и жить с ними.
         if has_legacy_css; then
-            strip_legacy_css
+            note "правила старого look.sh остались — их снимает buttons"
         fi
 
         revert_gi_keys "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
@@ -3791,19 +3939,36 @@ cmd_revert() {
                 local cur_icon
                 cur_icon=$(gi_get icon-theme)
                 case "$cur_icon" in
-                    *-dk-glyphs|*-Fluent-Titlebar)
-                        # База зашита в самом имени наследника — это точнее,
-                        # чем запомненное значение: тему значков мог поменять
-                        # icons уже ПОСЛЕ установки кнопок.
-                        gi_set icon-theme "$(icon_base_of "$cur_icon")"
+                    *-dk-glyphs)
+                        # Возвращаем ровно то, что стояло до кнопок: у темы
+                        # предшественника база не совпадает с её именем.
+                        local back
+                        back=$(state_get BTN_PREV_ICON)
+                        if [ -z "$back" ]; then
+                            back=$(icon_base_of "$cur_icon")
+                        fi
+                        gi_set icon-theme "$back"
                         rm -rf "$HOME/.local/share/icons/$cur_icon"
+                        ok "тема значков: $back"
+                        state_set BTN_PREV_ICON ""
+                        ;;
+                    *-Fluent-Titlebar)
+                        gi_set icon-theme "$(icon_base_of "$cur_icon")"
                         ok "тема значков: $(icon_base_of "$cur_icon")"
+                        note "каталог '$cur_icon' от старого скрипта не тронут"
                         ;;
                 esac
             fi
             restart_gtk_apps
             ;;
         widget)
+            # Конфиг conky правится целиком, маркеров в нём нет, поэтому
+            # откат подменяет файл копией «до первой правки». Всё, что
+            # человек дописал сам, при этом пропадёт — сохраним рядом.
+            if [ -f "$CONKY_CONF" ]; then
+                cp "$CONKY_CONF" "$CONKY_CONF.before-revert" 2>/dev/null
+                note "текущий конфиг сохранён: $CONKY_CONF.before-revert"
+            fi
             if restore_backup "$CONKY_CONF" "conky-main.conf"; then
                 rm -f "$CONKY_LUA"
                 restart_conky
@@ -3827,9 +3992,12 @@ cmd_revert() {
             local cur_ico
             cur_ico=$(gi_get icon-theme)
             case "$cur_ico" in
-                *-dk-glyphs|*-Fluent-Titlebar)
+                *-dk-glyphs)
                     rm -rf "$HOME/.local/share/icons/$cur_ico"
                     ok "наследник со значками заголовка удалён"
+                    ;;
+                *-Fluent-Titlebar)
+                    note "каталог '$cur_ico' создан старым скриптом — не трогаю"
                     ;;
             esac
             revert_gi_keys "ICON_THEME:icon-theme"
@@ -4164,6 +4332,7 @@ cmd_panel() {
             local value
             value=$(awk "BEGIN{printf \"%.2f\", $opacity/100}")
             remember DTP_OPACITY "$(dconf read $DTP/trans-panel-opacity 2>/dev/null)"
+            remember DTP_CUSTOM "$(dconf read $DTP/trans-use-custom-opacity 2>/dev/null)"
             dconf write $DTP/trans-use-custom-opacity true 2>/dev/null
             dconf write $DTP/trans-panel-opacity "$value" 2>/dev/null
             ok "прозрачность панели: ${opacity}%"
@@ -4550,6 +4719,41 @@ sandbox_run() {
     return 0
 }
 
+# Песочница обязана быть проверена, а не предполагаться. Если заглушки
+# не встали первыми в PATH, тест пошёл бы по живой системе и при этом
+# отрапортовал бы об успехе.
+sandbox_verify() {
+    local seen
+    seen=$(env -i PATH="$SB_BIN:/usr/local/bin:/usr/bin:/bin"         HOME="$SB" DK_STUB_STORE="$SB_STORE"         bash -c 'command -v gsettings')
+    if [ "$seen" != "$SB_BIN/gsettings" ]; then
+        t_fail "песочница не перехватывает gsettings"
+        t_detail "ожидался $SB_BIN/gsettings, найден: ${seen:-ничего}"
+        t_detail "дальнейшие проверки трогали бы живую систему — прерываю"
+        return 1
+    fi
+    seen=$(env -i PATH="$SB_BIN:/usr/local/bin:/usr/bin:/bin"         HOME="$SB" DK_STUB_STORE="$SB_STORE"         bash -c 'command -v curl')
+    if [ "$seen" != "$SB_BIN/curl" ]; then
+        t_fail "песочница не перехватывает curl"
+        t_detail "ожидался $SB_BIN/curl, найден: ${seen:-ничего}"
+        return 1
+    fi
+    if [ ! -d "$SB" ]; then
+        t_fail "каталог песочницы не создан"
+        return 1
+    fi
+    return 0
+}
+
+# Запуск без --yes и с ответом «нет» на любой вопрос: иначе ни одна
+# ветка confirm() никогда не проверяется.
+sandbox_run_no() {
+    SB_RC=0
+    printf 'n
+' | env -i         HOME="$SB"         USER="${USER:-tester}"         PATH="$SB_BIN:/usr/local/bin:/usr/bin:/bin"         LANG="${LANG:-C.UTF-8}"         TERM="${TERM:-dumb}"         DK_STUB_STORE="$SB_STORE"         XDG_CONFIG_HOME="$SB/.config"         XDG_DATA_HOME="$SB/.local/share"         XDG_STATE_HOME="$SB/.local/state"         XDG_CACHE_HOME="$SB/.cache"         DK_SYS_THEMES="$SB/sys/themes"         DK_SYS_ICONS="$SB/sys/icons"         DK_SYS_APPS="$SB/sys/applications"         bash "$SELF" "$@" > "$SB_OUT" 2>&1
+    SB_RC=$?
+    return 0
+}
+
 sandbox_drop() {
     if [ -n "$SB" ]; then
         # DK_KEEP_SANDBOX=1 оставляет каталог для вскрытия после провала
@@ -4662,6 +4866,20 @@ t_rc() {
 
 t_rc_not() {
     local name="$1"
+    # Падение скрипта — не «правильный отказ». Отличаем по коду и по
+    # характерным сообщениям самого bash.
+    if [ "$SB_RC" -ge 126 ]; then
+        t_fail "$name"
+        t_detail "скрипт не запустился (код $SB_RC), это не отказ по проверке"
+        sed 's/^/        /' "$SB_OUT" | head -6 >> "$TEST_DETAIL_FILE"
+        return 1
+    fi
+    if grep -qE 'syntax error|unbound variable|command not found|No such file or directory' "$SB_OUT" 2>/dev/null; then
+        t_fail "$name"
+        t_detail "в выводе следы поломки, а не осмысленного отказа:"
+        grep -nE 'syntax error|unbound variable|command not found|No such file or directory' "$SB_OUT"             | head -3 | sed 's/^/        /' >> "$TEST_DETAIL_FILE"
+        return 1
+    fi
     if [ "$SB_RC" != "0" ]; then
         t_ok "$name"
         return 0
@@ -4760,7 +4978,10 @@ cmd_selftest() {
     else
         t_fail "не Linux"
     fi
-    for t in bash sed grep awk find curl; do
+    # diff нужен откату (сравнение с резервной копией), comm — разбору
+    # результата сборки темы, tar — упаковке отчёта. Без них не упадёт
+    # сразу, но сломается в неочевидном месте.
+    for t in bash sed grep awk find curl diff comm tar cut tr; do
         if have "$t"; then
             t_ok "есть $t"
         else
@@ -5100,8 +5321,32 @@ selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
     note "живые настройки не трогаются вообще: скрипт видит только заглушки"
 
+    # Один раз убеждаемся, что изоляция настоящая
+    sandbox_new
+    if ! sandbox_verify; then
+        sandbox_drop
+        bad "изоляция не подтверждена — полные проверки не запускаю"
+        return 1
+    fi
+    t_ok "изоляция подтверждена: заглушки перехватывают внешние программы"
+    sandbox_drop
+
     local only="${SELFTEST_ONLY:-}"
     local g
+    local o
+    # Опечатка в имени группы раньше давала «всё прошло», не запустив
+    # вообще ничего.
+    for o in $only; do
+        case " $SELFTEST_GROUPS " in
+            *" $o "*) : ;;
+            *)
+                bad "нет группы проверок '$o'"
+                note "есть: $SELFTEST_GROUPS"
+                TEST_FAIL=$((TEST_FAIL + 1))
+                return 1
+                ;;
+        esac
+    done
     for g in $SELFTEST_GROUPS; do
         if [ -n "$only" ]; then
             case " $only " in
@@ -5265,6 +5510,27 @@ st_buttons() {
     t_has "наш блок записан" "$SB/.config/gtk-3.0/gtk.css" "dk:buttons-begin"
     t_out_has "про старые правила сказано вслух" "look.sh"
 
+    # Ответ «нет» должен уважаться: правила остаются на месте.
+    sandbox_drop
+    sandbox_new
+    printf '/* look-begin */
+button.titlebutton { min-width: 46px; }
+/* look-end */
+'         > "$SB/.config/gtk-3.0/gtk.css"
+    sandbox_run_no buttons --glyphs keep
+    t_has "на ответ «нет» правила предшественника остались"         "$SB/.config/gtk-3.0/gtk.css" "look-begin"
+
+    # Непарный маркер: вырезать нельзя, файл съело бы до конца.
+    sandbox_drop
+    sandbox_new
+    printf '/* look-begin */
+button { min-width: 46px; }
+window { color: red; }
+'         > "$SB/.config/gtk-3.0/gtk.css"
+    sandbox_run buttons --glyphs keep
+    t_has "при непарном маркере файл не тронут"         "$SB/.config/gtk-3.0/gtk.css" "window { color: red; }"
+    t_out_has "сказано про непарные маркеры" "не парные"
+
     # тема значков от предшественника тоже должна распознаваться
     sandbox_drop
     sandbox_new
@@ -5273,6 +5539,24 @@ st_buttons() {
     sb_set org.gnome.desktop.interface icon-theme "Papirus-Dark-Fluent-Titlebar"
     sandbox_run revert buttons
     t_eq "наследник предшественника снят до базы" "Papirus-Dark" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_file "чужой каталог значков не удалён" \
+        "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar/index.theme"
+
+    # Полный цикл: тема предшественника -> buttons -> revert. Вернуться
+    # должно ТОЧНОЕ прежнее имя, а не база, вычисленная из наследника.
+    sandbox_drop
+    sandbox_new
+    mkdir -p "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar"
+    printf '[Icon Theme]\nName=x\n' > "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar/index.theme"
+    sb_set org.gnome.desktop.interface icon-theme "Papirus-Dark-Fluent-Titlebar"
+    sandbox_run buttons
+    # Наследуем от НАСТОЯЩЕЙ темы, а не от наследника предшественника:
+    # иначе цепочка наследования росла бы с каждым переходом.
+    t_eq "наследник построен от настоящей базы" "Papirus-Dark-dk-glyphs" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    sandbox_run revert buttons
+    t_eq "откат вернул ТОЧНОЕ прежнее имя" "Papirus-Dark-Fluent-Titlebar" \
         "$(sb_get org.gnome.desktop.interface icon-theme)"
 
     # gtk-4.0/gtk.css как симлинк в тему — ссылку надо снять
@@ -5387,6 +5671,17 @@ st_theme() {
     sandbox_run theme --dark
     t_eq "и обратно" "Graphite-Dark-Square" \
         "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # Стоковая Ubuntu: тема Yaru, тёмная — Yaru-dark. Слова варианта в
+    # имени нет, и на этом theme --light раньше отказывал на СВЕЖЕЙ системе.
+    sb_set org.gnome.desktop.interface gtk-theme "Yaru"
+    sb_set org.gnome.desktop.interface color-scheme "prefer-dark"
+    sandbox_run theme --light
+    t_rc "стоковая Yaru: команда отработала" 0
+    t_eq "тема осталась Yaru" "Yaru" "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_eq "схема стала светлой" "prefer-light"         "$(sb_get org.gnome.desktop.interface color-scheme)"
+    sandbox_run theme --dark
+    t_eq "и обратно в Yaru-dark" "Yaru-dark"         "$(sb_get org.gnome.desktop.interface gtk-theme)"
 
     # слово варианта в имени есть, а пары нет — нельзя выдавать саму себя
     sb_set org.gnome.desktop.interface gtk-theme "Loner-Dark"
@@ -6028,7 +6323,7 @@ help_settings() {
   widget       ~/.config/conky/desktop-kit-bg.lua       отрисовка подложки
   newtab       ~/.local/share/newtab/index.html, links.txt, icons.json
   wallpapers   каталог обоев                  докачка и чистка
-  app          ~/.local/share/applications/<app>.desktop
+  app          ~/.local/share/applications/<app>.desktop  (с меткой авторства)
   (любая)      ~/bin/desktop-kit              копия себя для расписания
 
 СЛУЖБЫ SYSTEMD (пользовательские, каталог ~/.config/systemd/user)
