@@ -66,6 +66,8 @@ QUIET=0
 ok()   { if [ "$QUIET" = "0" ]; then echo "  ✓ $*"; fi; log "OK   $*"; }
 bad()  { echo "  ✗ $*" >&2; log "FAIL $*"; }
 note() { if [ "$QUIET" = "0" ]; then echo "    $*"; fi; log "     $*"; }
+# подсказка рядом с ошибкой: её нельзя терять даже в тихом режиме
+hint() { echo "    $*" >&2; log "     $*"; }
 head1() { if [ "$QUIET" = "0" ]; then echo "==> $*"; fi; log "=== $*"; }
 
 log() {
@@ -143,19 +145,53 @@ backup_once() {
 }
 
 restore_backup() {
-    src="$1"
-    name="$2"
-    dst="$BACKUP_DIR/$name"
+    local src="$1"
+    local name="$2"
+    local dst="$BACKUP_DIR/$name"
     local found=0
     if [ -e "$dst" ]; then found=1; fi
     if [ -L "$dst" ]; then found=1; fi
-    if [ "$found" = "1" ]; then
+    if [ "$found" = "0" ]; then
+        return 1
+    fi
+
+    # Умное сравнение годится только для файлов с нашими блоками-маркерами
+    # (gtk.css). Конфиг conky правится целиком, там сравнивать нечего —
+    # для него полная подмена и есть верное поведение.
+    local mode="${3:-whole}"
+    if [ "$mode" != "blocks" ]; then
         rm -f "$src"
         mv "$dst" "$src"
         ok "восстановлен $src"
         return 0
     fi
-    return 1
+
+    # Подмена файла целиком стёрла бы правки, сделанные пользователем ПОСЛЕ
+    # снятия копии. Поэтому сравниваем: если различий, кроме наших блоков,
+    # нет — подменяем; иначе оставляем файл как есть, сняв только своё.
+    if [ -f "$src" ]; then
+        local cleaned
+        cleaned=$(mktemp)
+        sed '/dk:[a-z]*-begin/,/dk:[a-z]*-end/d' "$src" > "$cleaned"
+        if diff -q "$cleaned" "$dst" >/dev/null 2>&1; then
+            rm -f "$cleaned"
+            rm -f "$src"
+            mv "$dst" "$src"
+            ok "восстановлен $src"
+            return 0
+        fi
+        cat "$cleaned" > "$src"
+        rm -f "$cleaned"
+        rm -f "$dst"
+        ok "наши правила убраны из $src"
+        note "файл менялся после установки — остальное содержимое сохранено"
+        return 0
+    fi
+
+    rm -f "$src"
+    mv "$dst" "$src"
+    ok "восстановлен $src"
+    return 0
 }
 
 # запомнить исходное значение настройки — только при первом изменении
@@ -212,17 +248,28 @@ css_has() {
 
 # GTK4-файл часто оказывается симлинком внутрь темы. Писать туда нельзя:
 # правки уедут в тему и пропадут при её переустановке.
-untangle_gtk4() {
-    if [ -L "$CSS4" ]; then
-        local target=$(readlink -f "$CSS4")
-        backup_once "$CSS4" "gtk-4.0-gtk.css"
-        rm -f "$CSS4"
-        touch "$CSS4"
+untangle_css() {
+    local file="$1"
+    local label="$2"
+    if [ -L "$file" ]; then
+        local target
+        target=$(readlink -f "$file")
+        backup_once "$file" "$label"
+        rm -f "$file"
+        touch "$file"
         note "симлинк на тему снят (тема лежала в $target)"
-        note "libadwaita темы всё равно не читает, потери вида нет"
+        note "правки в симлинк уехали бы внутрь темы и пропали при её обновлении"
     fi
-    mkdir -p "$(dirname "$CSS4")"
-    touch "$CSS4"
+    mkdir -p "$(dirname "$file")"
+    touch "$file"
+}
+
+untangle_gtk4() {
+    untangle_css "$CSS4" "gtk-4.0-gtk.css"
+}
+
+untangle_gtk3() {
+    untangle_css "$CSS3" "gtk-3.0-gtk.css"
 }
 
 # ------------------------------------------------------- перезапуски
@@ -381,6 +428,7 @@ cmd_buttons() {
         install_fluent_glyphs
     fi
 
+    untangle_gtk3
     backup_once "$CSS3" "gtk-3.0-gtk.css"
     untangle_gtk4
     backup_once "$CSS4" "gtk-4.0-gtk.css"
@@ -575,11 +623,15 @@ install_fluent_glyphs() {
     fi
 
     require_tools curl
-    rm -rf "$dir"
-    mkdir -p "$dir/symbolic/actions"
+    # Каталог собирается во временном месте и подменяется целиком только
+    # после успешного скачивания: иначе повторный запуск при обрыве сети
+    # оставил бы пользователя без активной темы значков.
+    local staging
+    staging=$(mktemp -d)
+    mkdir -p "$staging/symbolic/actions"
     local got=0
     for n in close maximize minimize restore; do
-        local f="$dir/symbolic/actions/window-$n-symbolic.svg"
+        local f="$staging/symbolic/actions/window-$n-symbolic.svg"
         local code=$(curl -sf -L --max-time 30 -o "$f" -w '%{http_code}' \
                "$FLUENT_ICONS/window-$n-symbolic.svg" 2>/dev/null)
         if [ "$code" = "200" ]; then
@@ -595,11 +647,11 @@ install_fluent_glyphs() {
 
     if [ "$got" -ne 4 ]; then
         bad "скачалось значков $got из 4 — оставляю прежние"
-        rm -rf "$dir"
+        rm -rf "$staging"
         return 1
     fi
 
-    cat > "$dir/index.theme" <<EOF
+    cat > "$staging/index.theme" <<EOF
 [Icon Theme]
 Name=$theme
 Comment=$base со значками заголовка из Fluent
@@ -613,6 +665,9 @@ MaxSize=512
 Context=Actions
 Type=Scalable
 EOF
+    rm -rf "$dir"
+    mkdir -p "$(dirname "$dir")"
+    mv "$staging" "$dir"
     if have gtk-update-icon-cache; then
         gtk-update-icon-cache -f "$dir" >/dev/null 2>&1
     fi
@@ -654,6 +709,7 @@ cmd_corners() {
     fi
 
     head1 "углы окон (радиус ${radius}px)"
+    untangle_gtk3
     backup_once "$CSS3" "gtk-3.0-gtk.css"
     untangle_gtk4
     backup_once "$CSS4" "gtk-4.0-gtk.css"
@@ -752,6 +808,9 @@ list_themes() {
     done | sort -u
 }
 
+# имя каталога темы, как её назвал установщик вендора
+THEME_INSTALLED=""
+
 theme_exists() {
     list_themes | grep -qx "$1"
 }
@@ -781,8 +840,17 @@ cmd_theme() {
     fi
 
     if [ -n "$do_install" ]; then
-        install_theme "$do_install"
-        wanted="$do_install"
+        THEME_INSTALLED=""
+        if ! install_theme "$do_install"; then
+            # без этого выхода дальше пойдёт подсказка «собери тему»,
+            # которая уже только что не сработала — кольцо
+            return 1
+        fi
+        if [ -n "$THEME_INSTALLED" ]; then
+            wanted="$THEME_INSTALLED"
+        else
+            wanted="$do_install"
+        fi
     fi
 
     if [ -z "$wanted" ]; then
@@ -845,7 +913,12 @@ cmd_theme() {
 }
 
 install_theme() {
-    name="$1"
+    local name="$1"
+    local repo
+    local src
+    local before
+    local after
+    local appeared
     repo=$(theme_repo_for "$name")
     if [ -z "$repo" ]; then
         die "не знаю, откуда брать тему '$name'"
@@ -862,6 +935,7 @@ install_theme() {
         return 0
     fi
 
+    before=$(list_themes)
     src="$HOME/.cache/desktop-kit/themes/$(basename "$repo" .git)"
     mkdir -p "$(dirname "$src")"
     if [ ! -d "$src/.git" ]; then
@@ -876,13 +950,43 @@ install_theme() {
 
     if theme_exists "$name"; then
         ok "тема собрана: $name"
-    else
-        bad "тема не появилась в ~/.themes"
-        note "что собралось:"
-        list_themes | grep -i "$(echo "$name" | cut -d- -f1)" | sed 's/^/      /'
+        THEME_INSTALLED="$name"
+        return 0
+    fi
+
+    # Установщики вендоров называют каталоги по-своему: попросили Graphite-Light,
+    # на диске может оказаться Graphite-light или Graphite-Light-nord. Поэтому
+    # сравниваем список тем до и после сборки и берём то, что реально появилось.
+    after=$(list_themes)
+    appeared=$(comm -13 <(printf '%s
+' "$before") <(printf '%s
+' "$after"))
+
+    if [ -z "$appeared" ]; then
+        bad "после сборки новых тем не появилось"
         note "подробности сборки: $LOG_FILE"
         return 1
     fi
+
+    local picked
+    picked=$(printf '%s
+' "$appeared" | grep -ix "$name" | head -1)
+    if [ -z "$picked" ]; then
+        picked=$(printf '%s
+' "$appeared" | grep -i -- "-$variant" | head -1)
+    fi
+    if [ -z "$picked" ]; then
+        picked=$(printf '%s
+' "$appeared" | head -1)
+    fi
+
+    ok "тема собрана под именем: $picked"
+    note "просили $name — установщик назвал каталог иначе, это нормально"
+    note "появилось всего: $(printf '%s
+' "$appeared" | tr '
+' ' ')"
+    THEME_INSTALLED="$picked"
+    return 0
 }
 
 # =====================================================================
@@ -956,8 +1060,8 @@ cmd_icons() {
             ok "папки перекрашены в $folders"
         else
             bad "не вышло, возможно нужен sudo:"
-            note "sudo papirus-folders -C $folders --theme $base"
-            note "$out"
+            hint "sudo papirus-folders -C $folders --theme $base"
+            hint "$out"
         fi
     fi
 
@@ -1136,6 +1240,14 @@ cmd_widget() {
     fi
 
     backup_once "$CONKY_CONF" "conky-main.conf"
+    # sed -i подменяет симлинк обычным файлом вместо правки цели
+    if [ -L "$CONKY_CONF" ]; then
+        local ctarget
+        ctarget=$(readlink -f "$CONKY_CONF")
+        bad "конфиг conky это симлинк на $ctarget"
+        note "правь его напрямую, иначе ссылка будет заменена файлом"
+        return 1
+    fi
 
     cat > "$CONKY_LUA" <<LUAEOF
 -- Подложка виджета: своего border-radius у conky нет ни в одной версии,
@@ -1254,6 +1366,23 @@ cmd_terminal() {
         return 0
     fi
 
+    # голый вызов должен что-то показывать, а не молчать
+    if [ -z "$opacity" ]; then
+        if [ -z "$font" ]; then
+            if [ -z "$palette" ]; then
+                show=1
+            fi
+        fi
+    fi
+    if [ "$show" = "1" ]; then
+        head1 "GNOME Terminal"
+        note "прозрачность:  $(gsettings get "$prof" background-transparency-percent 2>/dev/null)"
+        note "своя палитра:  $(gsettings get "$prof" use-theme-colors 2>/dev/null)"
+        note "шрифт:         $(gsettings get "$prof" font 2>/dev/null)"
+        note "меняется так:  $0 terminal --opacity 15"
+        return 0
+    fi
+
     head1 "GNOME Terminal"
 
     if [ -n "$opacity" ]; then
@@ -1352,8 +1481,8 @@ cmd_newtab() {
     local tile=130
     while [ $# -gt 0 ]; do
         case "$1" in
-            --add)     action="add"; value="${2:-}"; shift 2 ;;
-            --remove)  action="remove"; value="${2:-}"; shift 2 ;;
+            --add)     need_args "--add" 2 "$#"; action="add"; value="$2"; shift 2 ;;
+            --remove)  need_args "--remove" 2 "$#"; action="remove"; value="$2"; shift 2 ;;
             --list)    action="list"; shift ;;
             --edit)    action="edit"; shift ;;
             --clock) need_args "--clock" 2 "$#"; clock="${2:-110}"; shift 2 ;;
@@ -1385,7 +1514,7 @@ cmd_newtab() {
                 *) die "newtab: нужен разделитель, формат \"Имя|https://адрес\"" ;;
             esac
             name="${value%%|*}"
-            if grep -q "^$name|" "$NEWTAB_LINKS"; then
+            if grep -qF -- "$name|" "$NEWTAB_LINKS"; then
                 bad "ярлык '$name' уже есть"
                 return 1
             fi
@@ -1400,7 +1529,7 @@ cmd_newtab() {
             if [ -z "$value" ]; then
                 die "newtab: назови ярлык"
             fi
-            if ! grep -q "^$value|" "$NEWTAB_LINKS"; then
+            if ! grep -qF -- "$value|" "$NEWTAB_LINKS"; then
                 bad "ярлыка '$value' нет"
                 return 1
             fi
@@ -1408,7 +1537,17 @@ cmd_newtab() {
                 return 0
             fi
             backup_once "$NEWTAB_LINKS" "newtab-links.txt"
-            sed -i "/^$value|/d" "$NEWTAB_LINKS"
+            # имя ярлыка — данные пользователя, в регулярку его пускать нельзя:
+            # точка, звёздочка или скобка удалили бы не ту строку
+            local tmp
+            tmp=$(mktemp)
+            while IFS= read -r line; do
+                case "$line" in
+                    "$value|"*) : ;;
+                    *) printf '%s\n' "$line" >> "$tmp" ;;
+                esac
+            done < "$NEWTAB_LINKS"
+            mv "$tmp" "$NEWTAB_LINKS"
             ok "убран: $value"
             ;;
     esac
@@ -1598,7 +1737,7 @@ if(idx<0){idx=Math.floor(Math.random()*imgs.length);}
 if(idx>=imgs.length){idx=Math.floor(Math.random()*imgs.length);}
 function show(i,say){
   if(!imgs.length)return;
-  local idx=(i%imgs.length+imgs.length)%imgs.length;
+  idx=(i%imgs.length+imgs.length)%imgs.length;
   localStorage.setItem(KEY,idx);
   document.body.style.backgroundImage='url("'+imgs[idx]+'")';
   if(say){
@@ -1740,7 +1879,7 @@ cmd_wallpapers() {
                     action="timer"; day="$2"; at="$3"; shift 3
                 fi
                 ;;
-            --prune)  action="prune"; keep="${2:-900}"; shift 2 ;;
+            --prune)  need_args "--prune" 2 "$#"; action="prune"; keep="$2"; shift 2 ;;
             --urls)   action="urls"; shift ;;
             -h|--help) help_wallpapers; return 0 ;;
             *) die "wallpapers: неизвестный параметр $1" ;;
@@ -1788,6 +1927,9 @@ cmd_wallpapers() {
             ;;
     esac
 
+    if ! is_number "$count"; then
+        die "wallpapers: количество — целое число"
+    fi
     require_tools curl jq file
     mkdir -p "$walldir"
     res=$(detect_resolution)
@@ -1840,22 +1982,55 @@ cmd_wallpapers() {
         return 0
     fi
 
-    ( cd "$walldir"; xargs -r -n1 -P3 curl -sf --retry 2 --retry-delay 2 \
-        --max-time 120 --remove-on-error -O ) < "$take"
+    local dl_rc=0
+    if ( cd "$walldir"; xargs -r -n1 -P3 curl -sf --retry 2 --retry-delay 2 \
+        --max-time 120 --remove-on-error -O ) < "$take"; then
+        dl_rc=0
+    else
+        dl_rc=$?
+    fi
+    if [ "$dl_rc" != "0" ]; then
+        note "часть ссылок не отдалась (код $dl_rc)"
+    fi
 
-    local bad_files=0
-    for f in "$walldir"/*; do
-        if [ -f "$f" ]; then
-            if ! file --brief --mime-type "$f" | grep -q '^image/'; then
-                rm -f "$f"
-                bad_files=$((bad_files + 1))
-            fi
+    local missed=0
+    while read -r url; do
+        if [ ! -f "$walldir/$(basename "$url")" ]; then
+            missed=$((missed + 1))
         fi
-    done
-    local heavy=$(find "$walldir" -maxdepth 1 -type f -size +12M 2>/dev/null | wc -l)
-    find "$walldir" -maxdepth 1 -type f -size +12M -delete 2>/dev/null
+    done < "$take"
+    if [ "$missed" -gt 0 ]; then
+        note "не скачалось: $missed из $n"
+    fi
 
-    local now=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+    # Проверяем ТОЛЬКО что скачали. Проход по всему каталогу удалил бы
+    # чужие файлы: заметки, README, картинки других форматов.
+    local bad_files=0
+    local heavy=0
+    while read -r url; do
+        local f="$walldir/$(basename "$url")"
+        if [ ! -f "$f" ]; then
+            continue
+        fi
+        if ! file --brief --mime-type "$f" | grep -q '^image/'; then
+            rm -f "$f"
+            bad_files=$((bad_files + 1))
+            continue
+        fi
+        if [ "$(stat -c%s "$f" 2>/dev/null)" -gt 12582912 ]; then
+            rm -f "$f"
+            heavy=$((heavy + 1))
+        fi
+    done < "$take"
+
+    local now
+    now=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
+    if [ "$now" -le "$have_now" ]; then
+        bad "ни одна картинка не скачалась"
+        note "проверь сеть и доступность w.wallhaven.cc"
+        rm -f "$pool" "$pool.all" "$fresh" "$take"
+        return 1
+    fi
     if [ "$bad_files" -gt 0 ]; then
         note "выброшено битых: $bad_files"
     fi
@@ -1896,8 +2071,8 @@ install_wallpaper_timer() {
     if ! echo "$day" | grep -qE '^(Mon|Tue|Wed|Thu|Fri|Sat|Sun)(,(Mon|Tue|Wed|Thu|Fri|Sat|Sun))*$'; then
         die "день: Mon Tue Wed Thu Fri Sat Sun, можно через запятую"
     fi
-    if ! echo "$at" | grep -qE '^[0-2][0-9]:[0-5][0-9]$'; then
-        die "время в формате ЧЧ:ММ"
+    if ! echo "$at" | grep -qE '^([01][0-9]|2[0-3]):[0-5][0-9]$'; then
+        die "время в формате ЧЧ:ММ, часы 00-23"
     fi
 
     if would "поставить расписание $day $at"; then
@@ -1996,7 +2171,7 @@ cmd_wall() {
         case "$1" in
             --prev)    action="prev"; shift ;;
             --random)  action="random"; shift ;;
-            --set)     action="set"; target="${2:-}"; shift 2 ;;
+            --set)     need_args "--set" 2 "$#"; action="set"; target="$2"; shift 2 ;;
             --show)    action="show"; shift ;;
             -h|--help) help_wall; return 0 ;;
             *) die "wall: неизвестный параметр $1" ;;
@@ -2151,6 +2326,14 @@ cmd_app() {
         if would "убрать свой ярлык $dst"; then
             return 0
         fi
+        # ярлык мог быть написан пользователем до нас — тогда это не наш мусор
+        if [ -f "$dst" ]; then
+            if ! grep -q 'GTK_THEME=' "$dst"; then
+                bad "$dst не похож на созданный нами: в нём нет GTK_THEME"
+                note "убери вручную, если это действительно лишний файл"
+                return 1
+            fi
+        fi
         rm -f "$dst"
         if have update-desktop-database; then
             update-desktop-database "$HOME/.local/share/applications" 2>/dev/null
@@ -2174,6 +2357,12 @@ cmd_app() {
     fi
 
     mkdir -p "$(dirname "$dst")"
+    # если пользователь уже правил этот ярлык — сохраняем его версию
+    if [ -f "$dst" ]; then
+        if ! grep -q 'GTK_THEME=' "$dst"; then
+            backup_once "$dst" "app-$(basename "$dst")"
+        fi
+    fi
     cp "$src" "$dst"
 
     # каждый Exec, включая Actions: иначе часть пунктов останется прежней
@@ -2239,7 +2428,7 @@ cmd_serve() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --port) need_args "--port" 2 "$#"; port="${2:-8800}"; shift 2 ;;
-            --stop)    action="stop"; name="${2:-}"; shift 2 ;;
+            --stop)    need_args "--stop" 2 "$#"; action="stop"; name="$2"; shift 2 ;;
             --list)    action="list"; shift ;;
             -h|--help) help_serve; return 0 ;;
             -*) die "serve: неизвестный параметр $1" ;;
@@ -2430,6 +2619,20 @@ cmd_revert() {
 
     head1 "откат: $what"
 
+    if [ "$DRY_RUN" = "1" ]; then
+        note "(проверка) было бы возвращено:"
+        if [ -f "$BEFORE" ]; then
+            sed 's/^/      /' "$BEFORE"
+        else
+            note "      снимка исходных настроек нет"
+        fi
+        note "      блоки правил из gtk.css: $(grep -o 'dk:[a-z]*-begin' "$CSS3" "$CSS4" 2>/dev/null | sed 's/.*dk://; s/-begin//' | sort -u | tr '\n' ' ')"
+        if [ -d "$BACKUP_DIR" ]; then
+            note "      файлы из резервных копий: $(ls "$BACKUP_DIR" 2>/dev/null | tr '\n' ' ')"
+        fi
+        return 0
+    fi
+
     if [ "$what" = "all" ]; then
         for tag in buttons corners; do
             css_strip "$tag" "$CSS3"
@@ -2437,8 +2640,8 @@ cmd_revert() {
         done
         ok "правила из gtk.css убраны"
 
-        restore_backup "$CSS3" "gtk-3.0-gtk.css"
-        restore_backup "$CSS4" "gtk-4.0-gtk.css"
+        restore_backup "$CSS3" "gtk-3.0-gtk.css" blocks
+        restore_backup "$CSS4" "gtk-4.0-gtk.css" blocks
 
         local cur_icon=$(gi_get icon-theme)
         case "$cur_icon" in
@@ -2507,7 +2710,8 @@ cmd_revert() {
             ;;
         theme)
             for pair in "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
-                        "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name"; do
+                        "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name" \
+                        "MONOSPACE_FONT_NAME:monospace-font-name"; do
                 key="${pair%%:*}"
                 setting="${pair##*:}"
                 value=$(recall "$key")
@@ -2522,6 +2726,296 @@ cmd_revert() {
             die "revert: не знаю подсистемы '$what'"
             ;;
     esac
+}
+
+# =====================================================================
+#  keys — горячие клавиши
+# =====================================================================
+
+help_keys() {
+    cat <<'EOF'
+keys — свои горячие клавиши
+
+  desktop-kit keys                          показать все свои сочетания
+  desktop-kit keys --add "Имя|Команда|Клавиши"
+  desktop-kit keys --remove Имя
+  desktop-kit keys --defaults               набор из этого проекта
+
+  Клавиши пишутся в формате GNOME: <Control>q, <Super>space,
+  <Control>KP_Multiply (это серая звёздочка на цифровом блоке),
+  <Control>KP_Divide (серая косая черта).
+
+  Набор --defaults:
+    <Control>q               скриншот с выделением области
+    <Control>KP_Multiply     следующие обои
+    <Control>KP_Divide       предыдущие обои
+
+  Занятые системой сочетания GNOME не отдаст: если ничего не произошло,
+  посмотри Настройки → Клавиатура → Комбинации клавиш.
+EOF
+}
+
+KEYS_ROOT="/org/gnome/settings-daemon/plugins/media-keys"
+KEYS_SCHEMA="org.gnome.settings-daemon.plugins.media-keys"
+
+keys_list_paths() {
+    gsettings get "$KEYS_SCHEMA" custom-keybindings 2>/dev/null \
+        | grep -o "'[^']*'" | tr -d "'"
+}
+
+keys_show() {
+    local paths
+    local base
+    local name
+    local cmd
+    local bind
+    paths=$(keys_list_paths)
+    if [ -z "$paths" ]; then
+        note "своих сочетаний нет"
+        return 0
+    fi
+    for p in $paths; do
+        base="$KEYS_SCHEMA.custom-keybinding:$p"
+        name=$(gsettings get "$base" name 2>/dev/null | tr -d "'")
+        cmd=$(gsettings get "$base" command 2>/dev/null | tr -d "'")
+        bind=$(gsettings get "$base" binding 2>/dev/null | tr -d "'")
+        if [ -z "$bind" ]; then
+            bind="(не назначено)"
+        fi
+        note "$bind  —  $name"
+        note "        $cmd"
+    done
+}
+
+keys_add() {
+    local spec="$1"
+    local name
+    local cmd
+    local bind
+    local rest
+    local paths
+    local n
+    local newpath
+    local base
+    local all
+
+    case "$spec" in
+        *\|*\|*) : ;;
+        *) die "keys: формат \"Имя|Команда|Клавиши\"" ;;
+    esac
+
+    name="${spec%%|*}"
+    rest="${spec#*|}"
+    cmd="${rest%%|*}"
+    bind="${rest#*|}"
+
+    if [ -z "$name" ]; then
+        die "keys: пустое имя"
+    fi
+    if [ -z "$cmd" ]; then
+        die "keys: пустая команда"
+    fi
+    if [ -z "$bind" ]; then
+        die "keys: пустое сочетание"
+    fi
+
+    if would "добавить сочетание $bind -> $cmd"; then
+        return 0
+    fi
+
+    # ищем свободный номер, чтобы не затереть чужое
+    paths=$(keys_list_paths)
+    n=0
+    while true; do
+        newpath="$KEYS_ROOT/custom-keybindings/custom$n/"
+        if ! echo "$paths" | grep -qx "$newpath"; then
+            break
+        fi
+        n=$((n + 1))
+    done
+
+    base="$KEYS_SCHEMA.custom-keybinding:$newpath"
+    gsettings set "$base" name "$name" 2>/dev/null
+    gsettings set "$base" command "$cmd" 2>/dev/null
+    gsettings set "$base" binding "$bind" 2>/dev/null
+
+    all=""
+    for p in $paths; do
+        all="$all'$p', "
+    done
+    all="[$all'$newpath']"
+    gsettings set "$KEYS_SCHEMA" custom-keybindings "$all" 2>/dev/null
+
+    ok "$bind — $name"
+}
+
+keys_remove() {
+    local target="$1"
+    local paths
+    local base
+    local name
+    local keep
+    local found
+
+    paths=$(keys_list_paths)
+    keep=""
+    found=0
+    for p in $paths; do
+        base="$KEYS_SCHEMA.custom-keybinding:$p"
+        name=$(gsettings get "$base" name 2>/dev/null | tr -d "'")
+        if [ "$name" = "$target" ]; then
+            found=1
+            continue
+        fi
+        keep="$keep'$p', "
+    done
+
+    if [ "$found" = "0" ]; then
+        bad "сочетания с именем '$target' нет"
+        keys_show
+        return 1
+    fi
+
+    if would "убрать сочетание $target"; then
+        return 0
+    fi
+
+    keep=$(echo "$keep" | sed 's/, $//')
+    if [ -z "$keep" ]; then
+        gsettings set "$KEYS_SCHEMA" custom-keybindings "[]" 2>/dev/null
+    else
+        gsettings set "$KEYS_SCHEMA" custom-keybindings "[$keep]" 2>/dev/null
+    fi
+    ok "убрано: $target"
+}
+
+cmd_keys() {
+    local action="show"
+    local value=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --add)      need_args "--add" 2 "$#"; action="add"; value="$2"; shift 2 ;;
+            --remove)   need_args "--remove" 2 "$#"; action="remove"; value="$2"; shift 2 ;;
+            --defaults) action="defaults"; shift ;;
+            -h|--help)  help_keys; return 0 ;;
+            *) die "keys: неизвестный параметр $1" ;;
+        esac
+    done
+
+    head1 "горячие клавиши"
+
+    case "$action" in
+        show)     keys_show ;;
+        add)      keys_add "$value" ;;
+        remove)   keys_remove "$value" ;;
+        defaults)
+            local kit
+            kit="$BIN_DIR/desktop-kit"
+            if [ ! -x "$kit" ]; then
+                kit="$SELF"
+            fi
+            keys_add "Скриншот|flameshot gui|<Control>q"
+            keys_add "Следующие обои|$kit wall|<Control>KP_Multiply"
+            keys_add "Предыдущие обои|$kit wall --prev|<Control>KP_Divide"
+            note "серая звёздочка и косая черта — на цифровом блоке"
+            ;;
+    esac
+}
+
+# =====================================================================
+#  panel — Dash to Panel
+# =====================================================================
+
+help_panel() {
+    cat <<'EOF'
+panel — панель задач Dash to Panel
+
+  desktop-kit panel                    показать текущие настройки
+  desktop-kit panel --opacity N        прозрачность подложки 0..100
+  desktop-kit panel --size N           высота панели в пикселях
+  desktop-kit panel --transparent      полностью прозрачная подложка
+
+  Прозрачность в Dash to Panel задаётся ОДНА на все мониторы: отдельной
+  настройки для каждого экрана нет, сколько ни выбирай монитор в его
+  собственных настройках.
+
+  Значения сбрасываются при смене темы оболочки — это особенность
+  расширения, не скрипта.
+EOF
+}
+
+DTP="/org/gnome/shell/extensions/dash-to-panel"
+
+cmd_panel() {
+    local opacity=""
+    local size=""
+
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --opacity)     need_args "--opacity" 2 "$#"; opacity="$2"; shift 2 ;;
+            --size)        need_args "--size" 2 "$#"; size="$2"; shift 2 ;;
+            --transparent) opacity=0; shift ;;
+            -h|--help)     help_panel; return 0 ;;
+            *) die "panel: неизвестный параметр $1" ;;
+        esac
+    done
+
+    if ! have dconf; then
+        die "нет dconf — настройки расширения не прочитать"
+    fi
+
+    head1 "панель задач"
+
+    if [ -z "$opacity" ]; then
+        if [ -z "$size" ]; then
+            note "прозрачность: $(dconf read $DTP/trans-panel-opacity 2>/dev/null)"
+            note "своя прозрачность: $(dconf read $DTP/trans-use-custom-opacity 2>/dev/null)"
+            note "размеры: $(dconf read $DTP/panel-sizes 2>/dev/null)"
+            return 0
+        fi
+    fi
+
+    if [ -n "$opacity" ]; then
+        if ! is_number "$opacity"; then
+            die "panel: прозрачность — целое число 0..100"
+        fi
+        if [ "$opacity" -gt 100 ]; then
+            die "panel: прозрачность не больше 100"
+        fi
+        if would "прозрачность панели $opacity%"; then
+            :
+        else
+            local value
+            value=$(awk "BEGIN{printf \"%.2f\", $opacity/100}")
+            remember DTP_OPACITY "$(dconf read $DTP/trans-panel-opacity 2>/dev/null)"
+            dconf write $DTP/trans-use-custom-opacity true 2>/dev/null
+            dconf write $DTP/trans-panel-opacity "$value" 2>/dev/null
+            ok "прозрачность панели: ${opacity}%"
+            note "настройка общая для всех мониторов — так устроено расширение"
+        fi
+    fi
+
+    if [ -n "$size" ]; then
+        if ! is_number "$size"; then
+            die "panel: высота — целое число"
+        fi
+        if would "высота панели $size"; then
+            :
+        else
+            local monitors
+            monitors=$(dconf read $DTP/panel-sizes 2>/dev/null | tr -d "'")
+            if [ -z "$monitors" ]; then
+                bad "не прочитал текущие размеры панели"
+            else
+                remember DTP_SIZES "$monitors"
+                local updated
+                updated=$(echo "$monitors" | sed "s/:[0-9]\+/:$size/g")
+                dconf write $DTP/panel-sizes "'$updated'" 2>/dev/null
+                ok "высота панели: $size"
+            fi
+        fi
+    fi
 }
 
 # =====================================================================
@@ -2810,84 +3304,114 @@ PY
 }
 
 selftest_full() {
-    # каждая подсистема: применить, проверить след, откатить
-    local snapshot=$(mktemp)
-    gi_get gtk-theme > "$snapshot"
-    gi_get icon-theme >> "$snapshot"
+    # ВАЖНО: применяем и откатываем в ОТДЕЛЬНОМ доме, а не на живой машине.
+    # Прошлая версия делала revert all и уносила настройки пользователя в
+    # состояние до первого запуска kit'а — это потеря его настроек.
+    local sandbox
+    sandbox=$(mktemp -d)
+    note "песочница: $sandbox (живые настройки не трогаются)"
 
-    bash "$SELF" buttons --size 40 30 --icon 18 >/dev/null 2>&1
-    if css_has buttons "$CSS3"; then
+    mkdir -p "$sandbox/.config/gtk-3.0" "$sandbox/.config/conky" \
+             "$sandbox/.local/share/icons/Adwaita" "$sandbox/.local/share/newtab" \
+             "$sandbox/Pictures/wallpapers-uw" "$sandbox/.themes"
+
+    # исходное содержимое, чтобы проверить сохранность чужих правил
+    printf '/* чужое правило */\nwindow { color: red; }\n' > "$sandbox/.config/gtk-3.0/gtk.css"
+    printf "conky.config = {\n    own_window_argb_value = 225,\n    own_window_colour = '1e1e2e',\n}\n" \
+        > "$sandbox/.config/conky/main.conf"
+    printf 'Тест|https://example.com\n' > "$sandbox/.local/share/newtab/links.txt"
+    for i in 1 2 3; do
+        echo x > "$sandbox/Pictures/wallpapers-uw/w$i.jpg"
+    done
+
+    local s3="$sandbox/.config/gtk-3.0/gtk.css"
+    local s4="$sandbox/.config/gtk-4.0/gtk.css"
+
+    HOME="$sandbox" bash "$SELF" buttons --size 40 30 --icon 18 >/dev/null 2>&1
+    if grep -q 'dk:buttons-begin' "$s3" 2>/dev/null; then
         t_ok "buttons: правила записаны в gtk-3.0"
     else
         t_fail "buttons: правил в gtk-3.0 нет"
     fi
-    if css_has buttons "$CSS4"; then
+    if grep -q 'dk:buttons-begin' "$s4" 2>/dev/null; then
         t_ok "buttons: правила записаны в gtk-4.0"
     else
         t_fail "buttons: правил в gtk-4.0 нет"
     fi
-    if grep -q 'min-width: 40px' "$CSS4" 2>/dev/null; then
+    if grep -q 'min-width: 40px' "$s4" 2>/dev/null; then
         t_ok "buttons: размер применился"
     else
         t_fail "buttons: размер не применился"
     fi
-    if grep -q '!important' "$CSS4" 2>/dev/null; then
+    if grep -q '!important' "$s4" 2>/dev/null; then
         t_fail "buttons: в правилах появился !important"
     else
         t_ok "buttons: !important не появился"
     fi
 
-    bash "$SELF" corners --radius 8 >/dev/null 2>&1
-    if grep -q 'border-radius: 8px' "$CSS4" 2>/dev/null; then
+    HOME="$sandbox" bash "$SELF" corners --radius 8 >/dev/null 2>&1
+    if grep -q 'border-radius: 8px' "$s4" 2>/dev/null; then
         t_ok "corners: радиус применился"
     else
         t_fail "corners: радиус не применился"
     fi
-    if css_has buttons "$CSS4"; then
+    if grep -q 'dk:buttons-begin' "$s4" 2>/dev/null; then
         t_ok "corners: не затёр правила кнопок"
     else
         t_fail "corners: затёр правила кнопок"
     fi
 
-    if [ -f "$CONKY_CONF" ]; then
-        bash "$SELF" widget --radius 14 >/dev/null 2>&1
-        if grep -q 'local RADIUS = 14' "$CONKY_LUA" 2>/dev/null; then
-            t_ok "widget: подложка нарисована"
-        else
-            t_fail "widget: подложка не создана"
-        fi
+    HOME="$sandbox" bash "$SELF" widget --radius 14 >/dev/null 2>&1
+    if grep -q 'local RADIUS = 14' "$sandbox/.config/conky/desktop-kit-bg.lua" 2>/dev/null; then
+        t_ok "widget: подложка нарисована"
     else
-        t_skip "widget: конфига conky нет"
+        t_fail "widget: подложка не создана"
     fi
 
-    if [ -f "$NEWTAB_LINKS" ]; then
-        bash "$SELF" newtab >/dev/null 2>&1
-        if [ -f "$NEWTAB_DIR/index.html" ]; then
-            t_ok "newtab: страница собрана"
+    HOME="$sandbox" bash "$SELF" newtab >/dev/null 2>&1
+    if [ -f "$sandbox/.local/share/newtab/index.html" ]; then
+        t_ok "newtab: страница собрана"
+        # в JavaScript не должно быть ключевых слов оболочки
+        if grep -qE '^\s*local ' "$sandbox/.local/share/newtab/index.html"; then
+            t_fail "newtab: в JavaScript утекло 'local' — блок скрипта не выполнится"
         else
-            t_fail "newtab: страница не собралась"
+            t_ok "newtab: JavaScript чист"
         fi
     else
-        t_skip "newtab: списка ссылок нет"
+        t_fail "newtab: страница не собралась"
     fi
 
-    bash "$SELF" revert all >/dev/null 2>&1
-    if css_has buttons "$CSS3"; then
-        t_fail "revert: правила кнопок остались"
+    HOME="$sandbox" bash "$SELF" wall >/dev/null 2>&1
+    if [ -s "$sandbox/.local/state/desktop-kit/current-wallpaper" ]; then
+        t_ok "wall: обои выбраны по списку"
     else
-        t_ok "revert: правила кнопок убраны"
+        t_fail "wall: обои не выбрались"
     fi
-    if css_has corners "$CSS4"; then
-        t_fail "revert: правила углов остались"
+
+    HOME="$sandbox" bash "$SELF" revert all >/dev/null 2>&1
+    if grep -q 'dk:' "$s3" 2>/dev/null; then
+        t_fail "revert: правила остались"
     else
-        t_ok "revert: правила углов убраны"
+        t_ok "revert: правила убраны"
     fi
-    if [ "$(gi_get gtk-theme)" = "$(head -1 "$snapshot")" ]; then
-        t_ok "revert: тема окон вернулась"
+    if grep -q 'чужое правило' "$s3" 2>/dev/null; then
+        t_ok "revert: чужие правила уцелели"
     else
-        t_fail "revert: тема окон не вернулась"
+        t_fail "revert: чужие правила потеряны"
     fi
-    rm -f "$snapshot"
+    if grep -q 'own_window_argb_value = 225' "$sandbox/.config/conky/main.conf" 2>/dev/null; then
+        t_ok "revert: конфиг conky восстановлен"
+    else
+        t_fail "revert: конфиг conky не вернулся"
+    fi
+    if [ -f "$sandbox/Pictures/wallpapers-uw/w1.jpg" ]; then
+        t_ok "revert: обои не удалены"
+    else
+        t_fail "revert: откат снёс картинки"
+    fi
+
+    rm -rf "$sandbox"
+    note "песочница убрана, живые настройки не менялись"
 }
 
 # =====================================================================
@@ -2916,6 +3440,8 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   serve        отдать локальную апку по http://localhost
 
 ПРОЧЕЕ
+  keys         горячие клавиши
+  panel        панель задач: прозрачность, высота
   app          своя тема для одного приложения
   audit        полный снимок системы в markdown
   status       что сейчас применено
@@ -2947,8 +3473,27 @@ cmd_help() {
         wallpapers) help_wallpapers ;;
         wall)       help_wall ;;
         app)        help_app ;;
+        keys)       help_keys ;;
+        panel)      help_panel ;;
         serve)      help_serve ;;
         selftest)   help_selftest ;;
+        audit)      echo "audit — полный снимок системы в markdown"
+                    echo
+                    echo "  desktop-kit audit [ФАЙЛ]"
+                    echo
+                    echo "  Собирает версии программ, темы, расширения GNOME с их"
+                    echo "  настройками, горячие клавиши, конфиги Tabby и Chrome,"
+                    echo "  банк обоев, таймеры и автозапуск. Ничего не меняет."
+                    echo "  Пароли и ключи заменяются на <скрыто>."
+                    ;;
+        status)     echo "status — что сейчас применено"
+                    echo
+                    echo "  desktop-kit status"
+                    echo
+                    echo "  Показывает темы, шрифты, какие блоки правил лежат в"
+                    echo "  gtk.css, состояние банка обоев и расписания, и что"
+                    echo "  запомнено для отката. Ничего не меняет."
+                    ;;
         revert)     help_revert ;;
         "")         usage ;;
         *)          echo "нет справки по '$topic'"; usage; return 1 ;;
@@ -2996,12 +3541,14 @@ case "$COMMAND" in
     wall)       cmd_wall "$@" ;;
     app)        cmd_app "$@" ;;
     serve)      cmd_serve "$@" ;;
+    keys)       cmd_keys "$@" ;;
+    panel)      cmd_panel "$@" ;;
     audit)      cmd_audit "$@" ;;
     status)     cmd_status "$@" ;;
     selftest)   cmd_selftest "$@" ;;
     revert)     cmd_revert "$@" ;;
-    help)       cmd_help "$@" ;;
-    version|--version) echo "desktop-kit $VERSION" ;;
+    help|-h|--help) cmd_help "$@" ;;
+    version|--version|-V) echo "desktop-kit $VERSION" ;;
     "")         usage ;;
     *)
         echo "неизвестная команда: $COMMAND"
