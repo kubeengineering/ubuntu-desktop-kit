@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Кнопки заголовка и углы окон — правкой КОПИИ темы, а не пользовательского css.
+# Кнопки заголовка и углы окон: копия темы для GTK3, пользовательский css для GTK4.
 #
 #   ./look.sh                     кнопки + острые углы
 #   ./look.sh --no-corners        только кнопки, углы оставить как есть
@@ -17,15 +17,22 @@
 #     * свойство -gtk-icon-size существует ТОЛЬКО в GTK4, в GTK3 его нет,
 #       поэтому значок там не увеличивался ни при каких значениях;
 #     * ошибки разбора в самой теме (No property named "--accent-color")
-#       сыпались до нашего блока.
+#       сыпались до нашего блока;
+#     * и главное: libadwaita ЖЁСТКО ставит gtk-theme-name в Adwaita-empty
+#       и темы не читает вовсе, поэтому Nautilus и Настройки нельзя
+#       изменить через тему — только через ~/.config/gtk-4.0/gtk.css.
 #
-#   Здесь тема копируется в ИМЯ-Square, правила дописываются в САМЫЙ КОНЕЦ
-#   её собственных файлов, и система переключается на копию. Оригинал не
-#   трогается вовсе, пользовательский css не трогается вовсе, спорить со
-#   специфичностью не с кем.
+#   Отсюда две разные цели:
+#     GTK3-окна (терминал, Evolution) — копия темы ИМЯ-Square;
+#     GTK4-окна (Nautilus, Настройки) — ~/.config/gtk-4.0/gtk.css.
+#
+#   Тема копируется в ИМЯ-Square, правила дописываются в конец её файлов,
+#   система переключается на копию. Оригинал темы не трогается.
+#   Файл ~/.config/gtk-4.0/gtk.css сохраняется рядом как .bak-look до
+#   первой правки и восстанавливается при откате.
 #
 # ЧТО НЕ ТРОГАЕТСЯ: оригинальная тема, цветовая схема, тема оболочки,
-# иконки папок, обои, панель, conky, ~/.config/gtk-*.
+# иконки папок, обои, панель, conky, ~/.config/gtk-3.0/gtk.css.
 #
 # Chrome, Tabby и Telegram не изменятся: это Electron, они рисуют себя сами.
 
@@ -69,10 +76,29 @@ case "$CUR_GTK" in *"$SUFFIX") BASE_GTK="${CUR_GTK%$SUFFIX}" ;; esac
 BASE_ICON="$CUR_ICON"
 case "$CUR_ICON" in *-Fluent-Titlebar) BASE_ICON="${CUR_ICON%-Fluent-Titlebar}" ;; esac
 
+# Без имени темы дальше нельзя: путь вида ~/.themes/-Square попал бы
+# под rm -rf, да и откатывать было бы уже не к чему.
+if [ -z "$BASE_GTK" ]; then
+    echo "  x gsettings не отдал текущую тему окон - ничего не делаю"
+    echo "     проверь: gsettings get org.gnome.desktop.interface gtk-theme"
+    exit 1
+fi
+if [ -z "$BASE_ICON" ]; then
+    echo "  x gsettings не отдал текущую тему иконок - ничего не делаю"
+    exit 1
+fi
+
 NEW_GTK="$BASE_GTK$SUFFIX"
 NEW_ICON="$BASE_ICON-Fluent-Titlebar"
 THEME_DIR="$HOME/.themes/$NEW_GTK"
 ICON_DIR="$HOME/.local/share/icons/$NEW_ICON"
+
+# libadwaita (Nautilus, Настройки) ИГНОРИРУЕТ тему: он жёстко ставит
+# gtk-theme-name в Adwaita-empty. Единственный рычаг для таких окон —
+# пользовательский ~/.config/gtk-4.0/gtk.css, поэтому GTK4-правила идут
+# туда, а не в копию темы. Для GTK3-окон работает копия темы.
+USER_CSS4="$HOME/.config/gtk-4.0/gtk.css"
+USER_BAK="$HOME/.config/gtk-4.0/gtk.css.bak-look"
 
 # где лежит исходная тема
 find_theme() {
@@ -110,6 +136,22 @@ if [ "$MODE" = "revert" ]; then
         ok "вернул: тема $BASE_GTK, иконки $BASE_ICON"
     fi
 
+    # вернуть пользовательский GTK4-файл: либо из копии, либо снять наш блок
+    HAVE_BAK=0
+    if [ -e "$USER_BAK" ]; then HAVE_BAK=1; fi
+    if [ -L "$USER_BAK" ]; then HAVE_BAK=1; fi
+    if [ "$HAVE_BAK" = "1" ]; then
+        rm -f "$USER_CSS4"
+        mv "$USER_BAK" "$USER_CSS4"
+        ok "~/.config/gtk-4.0/gtk.css восстановлен"
+    elif [ -f "$USER_CSS4" ]; then
+        sed -i '/squarebuttons-begin/,/squarebuttons-end/d' "$USER_CSS4"
+        if [ ! -s "$USER_CSS4" ]; then
+            rm -f "$USER_CSS4"
+        fi
+        ok "правила из ~/.config/gtk-4.0/gtk.css убраны"
+    fi
+
     if [ -d "$THEME_DIR" ]; then
         rm -rf "$THEME_DIR"
         ok "копия темы удалена: $THEME_DIR"
@@ -123,7 +165,7 @@ if [ "$MODE" = "revert" ]; then
         nautilus -q >/dev/null 2>&1
     fi
     echo
-    echo "готово. Пользовательский ~/.config/gtk-* не трогался ни разу."
+    echo "готово. Оригинал темы и ~/.config/gtk-3.0 не трогались."
     exit 0
 fi
 
@@ -141,13 +183,17 @@ if [ "$MODE" = "check" ]; then
         else
             bad "копия темы есть, но правил в ней нет"
         fi
-        if grep -q 'squarebuttons-begin' "$THEME_DIR/gtk-4.0/gtk.css" 2>/dev/null; then
-            grep -m1 'gtk-icon-size' "$THEME_DIR/gtk-4.0/gtk.css" | sed 's/^/     GTK4: /'
-        else
-            bad "в GTK4-части копии правил нет"
+    else
+        bad "копии темы нет — GTK3-окна не изменятся"
+    fi
+    if grep -q 'squarebuttons-begin' "$USER_CSS4" 2>/dev/null; then
+        ok "GTK4-правила в ~/.config/gtk-4.0/gtk.css"
+        grep -m1 'gtk-icon-size' "$USER_CSS4" | sed 's/^/     GTK4: /'
+        if grep -q '@import' "$USER_CSS4"; then
+            echo "     тема подключена импортом"
         fi
     else
-        bad "копии темы нет — правки не применялись"
+        bad "GTK4-правил нет — Nautilus не изменится"
     fi
     if [ -d "$ICON_DIR" ]; then
         ok "значков Fluent: $(ls "$ICON_DIR/symbolic/actions" 2>/dev/null | wc -l) из 4"
@@ -309,7 +355,48 @@ $CORNERS3
 /* squarebuttons-end */
 EOF
 
-cat >> "$THEME_DIR/gtk-4.0/gtk.css" <<EOF
+# --- 2б. GTK4: только через пользовательский css ----------------------
+# libadwaita не читает темы, поэтому копии темы для Nautilus мало.
+# Оригинальный файл (часто это симлинк темы) сохраняем целиком.
+mkdir -p "$(dirname "$USER_CSS4")"
+# Бэкап делаем только с ЧИСТОГО файла. Иначе повторный запуск сохранит
+# файл, где уже лежат наши правила, и откат вернёт их же.
+HAVE_BAK=0
+if [ -e "$USER_BAK" ]; then HAVE_BAK=1; fi
+if [ -L "$USER_BAK" ]; then HAVE_BAK=1; fi
+if [ "$HAVE_BAK" = "0" ]; then
+    if [ -L "$USER_CSS4" ]; then
+        cp -P "$USER_CSS4" "$USER_BAK"
+        ok "исходный симлинк сохранён: $USER_BAK"
+    elif [ -f "$USER_CSS4" ]; then
+        if ! grep -q 'squarebuttons' "$USER_CSS4"; then
+            cp "$USER_CSS4" "$USER_BAK"
+            ok "исходный файл сохранён: $USER_BAK"
+        fi
+    fi
+fi
+
+# было симлинком — подключаем тему импортом, чтобы вид не потерялся
+IMPORT_LINE=""
+if [ -L "$USER_CSS4" ]; then
+    LINK_TARGET=$(readlink -f "$USER_CSS4")
+    IMPORT_LINE="@import url(\"file://$LINK_TARGET\");"
+    rm -f "$USER_CSS4"
+fi
+touch "$USER_CSS4"
+sed -i '/squarebuttons-begin/,/squarebuttons-end/d' "$USER_CSS4"
+
+if [ -n "$IMPORT_LINE" ]; then
+    if ! grep -q '@import' "$USER_CSS4"; then
+        printf '%s
+' "$IMPORT_LINE" > "$USER_CSS4.new"
+        cat "$USER_CSS4" >> "$USER_CSS4.new"
+        mv "$USER_CSS4.new" "$USER_CSS4"
+        ok "тема подключена импортом, вид окон сохранён"
+    fi
+fi
+
+cat >> "$USER_CSS4" <<EOF
 
 /* squarebuttons-begin
    В GTK4 узел называется windowcontrols, и здесь -gtk-icon-size работает. */
@@ -366,6 +453,8 @@ windowcontrols button.close:active {
 $CORNERS4
 /* squarebuttons-end */
 EOF
+ok "GTK4-правила в ~/.config/gtk-4.0/gtk.css (единственный путь для libadwaita)"
+
 
 ok "кнопка ${BTN_W}x${BTN_H}px, значок ${BTN_ICO}px (GTK3 через scale ${SCALE})"
 if [ "$DO_CORNERS" -eq 1 ]; then
@@ -455,7 +544,7 @@ echo "==> проверка"
 echo "  тема окон:    $(gi_get gtk-theme)"
 echo "  тема иконок:  $(gi_get icon-theme)"
 echo "  правил в GTK3: $(grep -c '!important' "$THEME_DIR/gtk-3.0/gtk.css" 2>/dev/null)"
-echo "  правил в GTK4: $(grep -c '!important' "$THEME_DIR/gtk-4.0/gtk.css" 2>/dev/null)"
+echo "  правил в GTK4: $(grep -c '!important' "$USER_CSS4" 2>/dev/null) (в ~/.config/gtk-4.0)"
 
 python3 - "$NEW_ICON" <<'PY' 2>/dev/null
 import sys
