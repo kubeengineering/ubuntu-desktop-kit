@@ -173,7 +173,8 @@ restore_backup() {
         local cleaned
         cleaned=$(mktemp)
         sed '/dk:[a-z]*-begin/,/dk:[a-z]*-end/d' "$src" > "$cleaned"
-        if diff -q "$cleaned" "$dst" >/dev/null 2>&1; then
+        # пустые строки на стыке блоков разницей не считаем
+        if diff -q -B "$cleaned" "$dst" >/dev/null 2>&1; then
             rm -f "$cleaned"
             rm -f "$src"
             mv "$dst" "$src"
@@ -195,6 +196,38 @@ restore_backup() {
 }
 
 # запомнить исходное значение настройки — только при первом изменении
+# BEFORE хранит «как было ДО нас» и не перезаписывается — на этом стоит
+# откат. Но часть значений это НАШИ последние настройки, они должны
+# обновляться при каждом запуске. Для них отдельный файл.
+KIT_STATE="$STATE_DIR/state.env"
+
+state_set() {
+    local key="$1"
+    local value="$2"
+    mkdir -p "$STATE_DIR"
+    touch "$KIT_STATE"
+    local tmp
+    tmp=$(mktemp)
+    grep -v "^$key=" "$KIT_STATE" > "$tmp" 2>/dev/null
+    mv "$tmp" "$KIT_STATE"
+    echo "$key='$value'" >> "$KIT_STATE"
+}
+
+state_get() {
+    local key="$1"
+    if [ ! -f "$KIT_STATE" ]; then
+        return 1
+    fi
+    local line
+    line=$(grep "^$key=" "$KIT_STATE" | tail -1)
+    if [ -z "$line" ]; then
+        return 1
+    fi
+    local value="${line#*=}"
+    echo "$value" | sed "s/^'//; s/'$//"
+    return 0
+}
+
 remember() {
     local key="$1"
     local value="$2"
@@ -207,7 +240,7 @@ remember() {
 }
 
 recall() {
-    key="$1"
+    local key="$1"
     if [ ! -f "$BEFORE" ]; then
         return 1
     fi
@@ -215,7 +248,7 @@ recall() {
     if [ -z "$line" ]; then
         return 1
     fi
-    value="${line#*=}"
+    local value="${line#*=}"
     echo "$value" | sed "s/^'//; s/'$//"
     return 0
 }
@@ -233,13 +266,22 @@ css_strip() {
 }
 
 css_append() {
-    tag="$1"
-    file="$2"
+    local tag="$1"
+    local file="$2"
     local body="$3"
     mkdir -p "$(dirname "$file")"
     touch "$file"
     css_strip "$tag" "$file"
-    printf '\n/* dk:%s-begin */\n%s\n/* dk:%s-end */\n' "$tag" "$body" "$tag" >> "$file"
+    # Ведущий перевод строки писать нельзя: после снятия блока в файле
+    # оставалась лишняя пустая строка, и сравнение с резервной копией при
+    # откате никогда не совпадало. Вместо этого дописываем перевод строки
+    # в конец файла, если его там нет.
+    if [ -s "$file" ]; then
+        if [ -n "$(tail -c 1 "$file")" ]; then
+            printf '\n' >> "$file"
+        fi
+    fi
+    printf '/* dk:%s-begin */\n%s\n/* dk:%s-end */\n' "$tag" "$body" "$tag" >> "$file"
 }
 
 css_has() {
@@ -368,6 +410,18 @@ buttons — кнопки заголовка: размер, значки, под�
   наследуется целиком, подменяются ровно четыре значка. Папки и
   приложения остаются прежними.
 
+  ЧТО КОМАНДА ДЕЛАЕТ ПОМИМО ОЧЕВИДНОГО:
+    * качает 4 значка с GitHub — нужны curl и сеть;
+    * создаёт тему <текущая>-dk-glyphs и переключает систему на неё,
+      поэтому в настройках тема значков будет называться иначе;
+    * если ~/.config/gtk-4.0/gtk.css был симлинком в тему — снимает
+      ссылку, иначе наши правила уехали бы внутрь темы;
+    * revert buttons возвращает базовую тему значков и удаляет наследника,
+      а тему, выбранную командой icons ПОСЛЕ, не трогает.
+
+  --hover с явным цветом перестаёт подстраиваться под тему: по умолчанию
+  подсветка задана как alpha(currentColor), и она следует за схемой сама.
+
   Не подействует на Chrome, Tabby, Telegram — это Electron, они рисуют
   кнопки сами. И на Kate — она Qt, у неё свой движок тем.
 EOF
@@ -424,8 +478,11 @@ cmd_buttons() {
     fi
     local close_active=$(darken_hex "$close_colour")
 
+    local glyphs_ok=1
     if [ "$glyphs" = "fluent" ]; then
-        install_fluent_glyphs
+        if ! install_fluent_glyphs; then
+            glyphs_ok=0
+        fi
     fi
 
     untangle_gtk3
@@ -580,6 +637,10 @@ EOF
 
     ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} (GTK4), масштаб ${gtk3_scale} (GTK3)"
     ok "подсветка: радиус ${radius}px, закрытие ${close_colour}"
+    if [ "$glyphs_ok" = "0" ]; then
+        bad "значки Fluent НЕ установлены — применена только геометрия"
+        note "форма значков осталась родной; повтори команду, когда будет сеть"
+    fi
     restart_gtk_apps
 }
 
@@ -671,7 +732,9 @@ EOF
     if have gtk-update-icon-cache; then
         gtk-update-icon-cache -f "$dir" >/dev/null 2>&1
     fi
-    remember ICON_THEME "$cur"
+    # ICON_THEME принадлежит команде icons. Для кнопок база восстанавливается
+    # отсечением суффикса -dk-glyphs, и запоминать её отдельно не нужно:
+    # так откат кнопок не сбрасывает тему значков, выбранную позже.
     gi_set icon-theme "$theme"
     ok "значки Fluent поверх $base"
     return 0
@@ -774,8 +837,29 @@ theme — тема оформления окон
   для известных ему тем (Graphite, Orchis, Colloid, Fluent, WhiteSur,
   Qogir, Jasper).
 
+  desktop-kit theme --light       ТЕКУЩАЯ тема, но светлая
+  desktop-kit theme --dark        ТЕКУЩАЯ тема, но тёмная
+  desktop-kit theme --light --scheme-only   только схема, тему не трогать
+
+  Про --light без имени темы: скрипт сам находит парный вариант той темы,
+  что стоит сейчас — Graphite-Dark становится Graphite-Light, Yaru-dark
+  становится Yaru. Знать название темы для этого не нужно. Если парного
+  варианта в системе нет, скрипт не меняет НИЧЕГО и показывает список
+  установленных светлых тем: смена одной лишь схемы дала бы светлый
+  Nautilus при тёмном терминале.
+
   Тема и цветовая схема меняются ВМЕСТЕ. Рассинхрон однажды уже дал
   нечитаемый вид: тёмная тема при светлой схеме — половина окон серая.
+
+  Тему значков команда НЕ трогает: они переживают смену темы окон.
+  За темой сами не идут терминал, виджет conky и страница новой вкладки —
+  скрипт напомнит об этом в конце.
+
+  Ещё эта команда меняет тему оболочки GNOME (dconf user-theme), если у
+  выбранной темы есть каталог gnome-shell.
+
+  --install клонирует репозиторий вендора и запускает его install.sh.
+  Это чужой код, выполняемый от твоего пользователя.
 
   На GTK4-приложения (Nautilus, Настройки) тема НЕ влияет: libadwaita
   её игнорирует. Их вид задаётся цветовой схемой и правилами из
@@ -810,9 +894,161 @@ list_themes() {
 
 # имя каталога темы, как её назвал установщик вендора
 THEME_INSTALLED=""
+# имя темы, выбранной переключателем яркости
+THEME_VARIANT_PICKED=""
 
+# Суффиксы вариантов, которые реально встречаются в именах каталогов тем.
+# Порядок важен: длинные идут первыми, иначе -Dark отрежет хвост у -Darker
+# и базой станет "Graphite-Dar".
+THEME_DARK_SUFFIXES="-Darker -darker -Dark -dark -DARK -Black -black"
+THEME_LIGHT_SUFFIXES="-Lighter -lighter -Light -light -LIGHT -White -white"
+
+# Регистр важен: каталог темы — это путь на диске. Но если совпадение
+# нашлось только без учёта регистра, полезнее подсказать точное имя,
+# чем сказать «темы нет».
 theme_exists() {
     list_themes | grep -qx "$1"
+}
+
+theme_exists_ci() {
+    list_themes | grep -qix "$1"
+}
+
+theme_real_name() {
+    list_themes | grep -ix "$1" | head -1
+}
+
+# Светлая тема, тёмная или по имени не понять.
+theme_variant_of() {
+    local name="$1"
+    local s
+    for s in $THEME_DARK_SUFFIXES; do
+        case "$name" in *"$s") echo "dark"; return 0 ;; esac
+    done
+    for s in $THEME_LIGHT_SUFFIXES; do
+        case "$name" in *"$s") echo "light"; return 0 ;; esac
+    done
+    echo "unknown"
+}
+
+# Имя без суффикса варианта: Graphite-teal-Dark -> Graphite-teal
+theme_base_of() {
+    local name="$1"
+    local s
+    for s in $THEME_DARK_SUFFIXES $THEME_LIGHT_SUFFIXES; do
+        case "$name" in *"$s") echo "${name%$s}"; return 0 ;; esac
+    done
+    echo "$name"
+}
+
+# Найти среди УСТАНОВЛЕННЫХ тем вариант нужной яркости для этой базы.
+theme_find_variant() {
+    local base="$1"
+    local want="$2"
+    local sufs
+    local s
+    if [ "$want" = "dark" ]; then
+        sufs="$THEME_DARK_SUFFIXES"
+    else
+        sufs="$THEME_LIGHT_SUFFIXES"
+    fi
+    for s in $sufs; do
+        if theme_exists "$base$s"; then
+            echo "$base$s"
+            return 0
+        fi
+    done
+    # У части тем светлый вариант — это имя БЕЗ суффикса: Yaru против
+    # Yaru-dark, Adwaita против Adwaita-dark. Для тёмного так не бывает.
+    if [ "$want" = "light" ]; then
+        if theme_exists "$base"; then
+            echo "$base"
+            return 0
+        fi
+    fi
+    return 1
+}
+
+# Установленные темы нужной яркости — для подсказки, когда пары не нашлось.
+theme_list_variants() {
+    local want="$1"
+    local t
+    local v
+    list_themes | while read -r t; do
+        v=$(theme_variant_of "$t")
+        if [ "$v" = "$want" ]; then
+            echo "$t"
+            continue
+        fi
+        # Имя без суффикса считаем светлым только если у него есть тёмный
+        # собрат: иначе в список светлых попадут все тёмные темы без суффикса.
+        if [ "$want" = "light" ]; then
+            if [ "$v" = "unknown" ]; then
+                if theme_find_variant "$t" dark >/dev/null 2>&1; then
+                    echo "$t"
+                fi
+            fi
+        fi
+    done
+}
+
+# Переключить ТЕКУЩУЮ тему на её вариант другой яркости, не зная её имени.
+# Результат кладётся в THEME_VARIANT_PICKED; ничего не применяет само.
+theme_switch_variant() {
+    local want="$1"
+    local cur
+    local base
+    local have
+    local found
+    local word
+    local repo
+    local suffix
+    local flag
+
+    THEME_VARIANT_PICKED=""
+    if [ "$want" = "light" ]; then
+        word="светлого"
+        suffix="-Light"
+        flag="--light"
+    else
+        word="тёмного"
+        suffix="-Dark"
+        flag="--dark"
+    fi
+
+    cur=$(gi_get gtk-theme)
+    if [ -z "$cur" ]; then
+        bad "не прочитал текущую тему окон"
+        return 1
+    fi
+    have=$(theme_variant_of "$cur")
+    base=$(theme_base_of "$cur")
+
+    found=$(theme_find_variant "$base" "$want")
+    if [ -n "$found" ]; then
+        if [ "$found" = "$cur" ]; then
+            note "$cur уже подходит — это и есть вариант нужной яркости"
+        else
+            note "$cur -> $found"
+        fi
+        THEME_VARIANT_PICKED="$found"
+        return 0
+    fi
+
+    bad "$word варианта темы '$cur' в системе нет"
+    if [ "$have" = "unknown" ]; then
+        note "в имени '$cur' нет суффикса варианта, парную тему искать негде"
+    fi
+    repo=$(theme_repo_for "$base")
+    if [ -n "$repo" ]; then
+        note "эту тему знаю, вариант можно собрать:"
+        note "  $0 theme --install $base$suffix"
+    fi
+    note "или возьми любую из установленных:"
+    theme_list_variants "$want" | sed 's/^/      /'
+    note "если нужно поменять только схему для GTK4-приложений:"
+    note "  $0 theme $flag --scheme-only"
+    return 1
 }
 
 cmd_theme() {
@@ -820,6 +1056,8 @@ cmd_theme() {
     local scheme=""
     local do_install=""
     local only_list=0
+    local scheme_only=0
+    local head_done=0
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -827,6 +1065,7 @@ cmd_theme() {
             --install) need_args "--install" 2 "$#"; do_install="${2:-}"; shift 2 ;;
             --dark)    scheme="prefer-dark"; shift ;;
             --light)   scheme="prefer-light"; shift ;;
+            --scheme-only) scheme_only=1; shift ;;
             -h|--help) help_theme; return 0 ;;
             -*) die "theme: неизвестный параметр $1" ;;
             *) wanted="$1"; shift ;;
@@ -840,6 +1079,20 @@ cmd_theme() {
     fi
 
     if [ -n "$do_install" ]; then
+        # --install Graphite вместе с --light должен собрать светлый вариант,
+        # а не тёмный по умолчанию.
+        case "$(theme_variant_of "$do_install")" in
+            unknown)
+                if [ "$scheme" = "prefer-light" ]; then
+                    do_install="$do_install-Light"
+                    note "собираю светлый вариант: $do_install"
+                fi
+                if [ "$scheme" = "prefer-dark" ]; then
+                    do_install="$do_install-Dark"
+                    note "собираю тёмный вариант: $do_install"
+                fi
+                ;;
+        esac
         THEME_INSTALLED=""
         if ! install_theme "$do_install"; then
             # без этого выхода дальше пойдёт подсказка «собери тему»,
@@ -864,7 +1117,31 @@ cmd_theme() {
         fi
     fi
 
+    # «Сделай светлой» без имени темы: ищем парный вариант ТЕКУЩЕЙ темы.
+    # Менять одну лишь цветовую схему тут нельзя — GTK3-приложения её не
+    # слушают, окно осталось бы тёмным при светлом Nautilus.
+    if [ -z "$wanted" ]; then
+        if [ -n "$scheme" ]; then
+            if [ "$scheme_only" = "0" ]; then
+                head1 "тема окон"
+                head_done=1
+                if ! theme_switch_variant "${scheme#prefer-}"; then
+                    return 1
+                fi
+                wanted="$THEME_VARIANT_PICKED"
+            fi
+        fi
+    fi
+
     if [ -n "$wanted" ]; then
+        if ! theme_exists "$wanted"; then
+            local real
+            real=$(theme_real_name "$wanted")
+            if [ -n "$real" ]; then
+                note "имя каталога пишется иначе: $real"
+                wanted="$real"
+            fi
+        fi
         if ! theme_exists "$wanted"; then
             bad "темы '$wanted' в системе нет"
             local repo=$(theme_repo_for "$wanted")
@@ -878,14 +1155,25 @@ cmd_theme() {
             return 1
         fi
 
-        head1 "тема окон"
+        if [ "$head_done" = "0" ]; then
+            head1 "тема окон"
+            head_done=1
+        fi
         remember GTK_THEME "$(gi_get gtk-theme)"
         remember SHELL_THEME "$(dconf read /org/gnome/shell/extensions/user-theme/name 2>/dev/null | tr -d "'")"
         gi_set gtk-theme "$wanted"
         ok "тема: $wanted"
 
-        # тема оболочки — только если такая существует
-        if [ -d "$HOME/.themes/$wanted/gnome-shell" ]; then
+        # тема оболочки — только если такая существует. Каталог может лежать
+        # и в системном /usr/share/themes, а не только в домашнем.
+        local shell_dir=""
+        for d in "$HOME/.themes/$wanted" "$HOME/.local/share/themes/$wanted" \
+                 "/usr/share/themes/$wanted"; do
+            if [ -d "$d/gnome-shell" ]; then
+                shell_dir="$d"
+            fi
+        done
+        if [ -n "$shell_dir" ]; then
             if would "тема оболочки $wanted"; then
                 :
             else
@@ -894,11 +1182,23 @@ cmd_theme() {
             fi
         fi
 
-        # схему выводим из имени, если явно не задана
+        # Схему выводим из имени, если явно не задана. Тема без суффикса
+        # (Yaru, Adwaita) — светлая, но только если у неё есть тёмный собрат:
+        # иначе в светлые попадут тёмные темы, которые просто не подписаны.
         if [ -z "$scheme" ]; then
-            case "$wanted" in
-                *-Light|*-light) scheme="prefer-light" ;;
-                *-Dark|*-dark)   scheme="prefer-dark" ;;
+            local vguess
+            vguess=$(theme_variant_of "$wanted")
+            case "$vguess" in
+                light) scheme="prefer-light" ;;
+                dark)  scheme="prefer-dark" ;;
+                *)
+                    if theme_find_variant "$wanted" dark >/dev/null 2>&1; then
+                        scheme="prefer-light"
+                    else
+                        note "по имени '$wanted' светлая она или тёмная не понять"
+                        note "схему задай сам: $0 theme $wanted --light"
+                    fi
+                    ;;
             esac
         fi
     fi
@@ -909,7 +1209,30 @@ cmd_theme() {
         ok "цветовая схема: $scheme"
     fi
 
+    # Что за темой НЕ идёт: человек должен узнать это здесь, а не потом
+    # по нечитаемому терминалу.
+    if [ -n "$wanted" ]; then
+        echo
+        note "тема значков не менялась: $(gi_get icon-theme)"
+        note "за темой сами НЕ идут:"
+        note "  терминал   — $0 terminal --palette wal"
+        note "  виджет     — $0 widget --colour RRGGBB"
+        note "  новая вкладка — $0 newtab"
+        note "  кнопки заголовка переживают смену темы, править не нужно"
+    fi
+
     restart_gtk_apps
+}
+
+# Установщики vinceliuice с ключом -l делают ~/.config/gtk-4.0/gtk.css
+# симлинком внутрь темы. Наши блоки после этого уехали бы в каталог темы
+# и пропали при её следующей пересборке.
+install_theme_check_symlink() {
+    if [ -L "$CSS4" ]; then
+        bad "после сборки ~/.config/gtk-4.0/gtk.css стал симлинком в тему"
+        note "наши правила туда писать нельзя — сниму ссылку при первом же"
+        note "вызове buttons или corners, вид от этого не пострадает"
+    fi
 }
 
 install_theme() {
@@ -951,6 +1274,7 @@ install_theme() {
     if theme_exists "$name"; then
         ok "тема собрана: $name"
         THEME_INSTALLED="$name"
+        install_theme_check_symlink
         return 0
     fi
 
@@ -980,6 +1304,7 @@ install_theme() {
 ' "$appeared" | head -1)
     fi
 
+    install_theme_check_symlink
     ok "тема собрана под именем: $picked"
     note "просили $name — установщик назвал каталог иначе, это нормально"
     note "появилось всего: $(printf '%s
@@ -1005,8 +1330,14 @@ icons — тема значков и цвет папок
   Цвета папок: adwaita black blue bluegrey breeze brown cyan green grey
   indigo magenta nordic orange pink red teal violet white yaru yellow
 
-  Перекраска работает через papirus-folders и меняет саму тему Papirus,
-  поэтому наследники её подхватывают автоматически.
+  Перекраска работает через papirus-folders и меняет саму тему Papirus
+  НА ДИСКЕ, поэтому наследники её подхватывают автоматически. Отсюда два
+  следствия: тема часто лежит в /usr/share/icons и тогда нужен sudo, а
+  обновление пакета papirus-icon-theme через apt сбросит цвет — команду
+  придётся повторить. Откатить цвет можно только другой перекраской.
+
+  Смена темы значков не ломает кнопки заголовка: если активен наследник
+  <база>-dk-glyphs от команды buttons, он пересобирается поверх новой темы.
 EOF
 }
 
@@ -1023,9 +1354,11 @@ list_icon_themes() {
 }
 
 cmd_icons() {
-    wanted=""
+    local wanted=""
     local folders=""
-    only_list=0
+    local only_list=0
+    local base=""
+    local code=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --folders) need_args "--folders" 2 "$#"; folders="${2:-}"; shift 2 ;;
@@ -1051,13 +1384,26 @@ cmd_icons() {
         fi
         base=$(gi_get icon-theme)
         case "$base" in *-dk-glyphs) base="${base%-dk-glyphs}" ;; esac
+        case "$base" in
+            Papirus*) : ;;
+            *)
+                bad "papirus-folders умеет красить только темы Papirus"
+                note "сейчас активна '$base' — сначала: $0 icons Papirus-Dark"
+                return 1
+                ;;
+        esac
         if would "перекрасить папки $base в $folders"; then
             return 0
         fi
-        local out=$(papirus-folders -C "$folders" --theme "$base" 2>&1)
+        # `local out=$(...)` вернул бы код самого local, то есть всегда 0 —
+        # объявление и присваивание нужно разделять.
+        local out
+        out=$(papirus-folders -C "$folders" --theme "$base" 2>&1)
         code=$?
         if [ "$code" = "0" ]; then
+            remember FOLDER_COLOUR "$folders"
             ok "папки перекрашены в $folders"
+            note "цвет живёт в самой теме Papirus — обновление пакета его сбросит"
         else
             bad "не вышло, возможно нужен sudo:"
             hint "sudo papirus-folders -C $folders --theme $base"
@@ -1073,10 +1419,29 @@ cmd_icons() {
             return 1
         fi
         head1 "тема значков"
+        # Значки заголовка от buttons живут в теме-наследнике <база>-dk-glyphs.
+        # Простая смена icon-theme снесла бы их молча, поэтому наследника
+        # пересобираем поверх новой базы.
+        local had_glyphs=0
+        case "$(gi_get icon-theme)" in
+            *-dk-glyphs) had_glyphs=1 ;;
+        esac
+
         remember ICON_THEME "$(gi_get icon-theme)"
         gi_set icon-theme "$wanted"
         ok "тема значков: $wanted"
-        note "если нужны свои значки заголовка — $0 buttons"
+
+        if [ "$had_glyphs" = "1" ]; then
+            note "были свои значки заголовка — пересобираю поверх $wanted"
+            if install_fluent_glyphs; then
+                ok "значки заголовка сохранены"
+            else
+                bad "пересобрать не вышло — значки заголовка сейчас родные"
+                note "повтори позже: $0 buttons"
+            fi
+        else
+            note "если нужны свои значки заголовка — $0 buttons"
+        fi
     fi
 
     if [ -z "$wanted" ]; then
@@ -1172,8 +1537,16 @@ widget — виджет conky на рабочем столе
 
   --radius N     скругление углов, по умолчанию 12
   --opacity N    плотность подложки 0..255, по умолчанию берётся из конфига
-  --color HEX    цвет подложки, по умолчанию из конфига
+  --colour HEX   цвет подложки, по умолчанию из конфига
+  --text HEX     цвет текста виджета
+  --light        светлая подложка с тёмным текстом
+  --dark         тёмная подложка со светлым текстом
   --square       без скругления (то же, что --radius 0)
+
+  Про --light: при переходе системы на светлую тему conky за ней НЕ идёт.
+  Тёмная подложка так и останется тёмной, а если поменять только её —
+  получится белый текст на белом. Поэтому цвет текста правится отдельно,
+  и скрипт предупреждает, когда подложка и текст оказались одной яркости.
 
   У conky нет своего border-radius ни в одной версии, поэтому подложку
   рисует Lua через Cairo, а собственное окно conky делается прозрачным.
@@ -1182,15 +1555,19 @@ EOF
 }
 
 cmd_widget() {
-    radius=12
+    local radius=12
     local opacity=""
     local colour=""
+    local ink=""
     while [ $# -gt 0 ]; do
         case "$1" in
             --radius) need_args "--radius" 2 "$#"; radius="${2:-12}"; shift 2 ;;
             --opacity) need_args "--opacity" 2 "$#"; opacity="${2:-}"; shift 2 ;;
-            --color) need_args "--color" 2 "$#"; colour="${2:-}"; shift 2 ;;
+            --color|--colour) need_args "$1" 2 "$#"; colour="${2:-}"; shift 2 ;;
+            --text|--text-colour) need_args "$1" 2 "$#"; ink="${2:-}"; shift 2 ;;
             --square)  radius=0; shift ;;
+            --light)   colour="f2f2f2"; ink="1e1e2e"; shift ;;
+            --dark)    colour="1e1e2e"; ink="ffffff"; shift ;;
             -h|--help) help_widget; return 0 ;;
             *) die "widget: неизвестный параметр $1" ;;
         esac
@@ -1206,7 +1583,7 @@ cmd_widget() {
     head1 "виджет conky (радиус ${radius}px)"
 
     if [ -z "$colour" ]; then
-        colour=$(grep -oP "own_window_colour\s*=\s*'\K[0-9a-fA-F]{6}" "$CONKY_CONF" | head -1)
+        colour=$(conf_value own_window_colour "$CONKY_CONF")
     fi
     colour="${colour#\#}"
     if [ -z "$colour" ]; then
@@ -1214,21 +1591,22 @@ cmd_widget() {
     fi
 
     if [ -z "$opacity" ]; then
-        opacity=$(grep -oP "own_window_argb_value\s*=\s*\K[0-9]+" "$CONKY_CONF" | head -1)
+        opacity=$(conf_value own_window_argb_value "$CONKY_CONF")
     fi
     if [ -z "$opacity" ]; then
         opacity=225
     fi
     # ноль означает, что мы уже применяли: берём прежнюю плотность
     if [ "$opacity" = "0" ]; then
-        local saved=$(recall CONKY_ALPHA)
+        local saved
+        saved=$(state_get CONKY_ALPHA)
         if [ -n "$saved" ]; then
             opacity="$saved"
         else
             opacity=225
         fi
     fi
-    remember CONKY_ALPHA "$opacity"
+    state_set CONKY_ALPHA "$opacity"
 
     r=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:0:2}))/255}")
     g=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:2:2}))/255}")
@@ -1302,8 +1680,64 @@ LUAEOF
         sed -i "s|lua_load = '$CONKY_LUA',|lua_load = '$CONKY_LUA',\n    lua_draw_hook_pre = 'draw_bg',|" "$CONKY_CONF"
     fi
 
+    # Цвет текста живёт отдельно от подложки: светлая подложка с белым
+    # текстом даёт белое на белом, и виджет просто исчезает.
+    if [ -n "$ink" ]; then
+        ink="${ink#\#}"
+        backup_once "$CONKY_CONF" "conky-main.conf"
+        if grep -q 'default_color' "$CONKY_CONF"; then
+            sed -i "s|default_color *= *'[^']*'|default_color = '$ink'|" "$CONKY_CONF"
+        else
+            sed -i "0,/conky.config = {/s|conky.config = {|conky.config = {\n    default_color = '$ink',|" "$CONKY_CONF"
+        fi
+        state_set CONKY_INK "$ink"
+        ok "цвет текста: #$ink"
+    fi
+
     ok "подложка: радиус ${radius}px, цвет #${colour}, плотность ${opacity}"
+
+    # Предупредить о белом на белом, пока человек не увидел это глазами.
+    local bright
+    bright=$(hex_brightness "$colour")
+    if [ "$bright" -gt 140 ]; then
+        local cur_ink
+        cur_ink=$(conf_value default_color "$CONKY_CONF")
+        if [ -n "$cur_ink" ]; then
+            if [ "$(hex_brightness "$cur_ink")" -gt 140 ]; then
+                bad "подложка светлая, текст тоже — виджет будет не виден"
+                note "почини так: $0 widget --text 1e1e2e"
+            fi
+        fi
+    fi
+
     restart_conky
+}
+
+# Значение ключа из конфига conky. Через sed, а не grep -P: у grep
+# перловые выражения отваливаются в не-UTF-8 локали ("-P supports only
+# unibyte and UTF-8 locales"), а таймер systemd запускается с C.
+conf_value() {
+    local key="$1"
+    local file="$2"
+    if [ ! -f "$file" ]; then
+        return 0
+    fi
+    grep -m1 -- "$key" "$file" \
+        | tr -d " ',"  \
+        | cut -d= -f2
+}
+
+# Яркость по восприятию: зелёный весит больше синего.
+hex_brightness() {
+    local hex="${1#\#}"
+    if [ ${#hex} -ne 6 ]; then
+        echo 0
+        return 0
+    fi
+    local r=$((16#${hex:0:2}))
+    local g=$((16#${hex:2:2}))
+    local b=$((16#${hex:4:2}))
+    echo $(((r * 299 + g * 587 + b * 114) / 1000))
 }
 
 # =====================================================================
@@ -1338,7 +1772,7 @@ term_profile() {
 }
 
 cmd_terminal() {
-    opacity=""
+    local opacity=""
     local font=""
     local palette=""
     local show=0
@@ -1395,6 +1829,8 @@ cmd_terminal() {
         if would "прозрачность $opacity%"; then
             :
         else
+            remember TERM_TRANSPARENT "$(gsettings get "$prof" use-transparent-background 2>/dev/null)"
+            remember TERM_OPACITY "$(gsettings get "$prof" background-transparency-percent 2>/dev/null)"
             gsettings set "$prof" use-transparent-background true 2>/dev/null
             gsettings set "$prof" background-transparency-percent "$opacity" 2>/dev/null
             ok "прозрачность: ${opacity}%"
@@ -1402,6 +1838,7 @@ cmd_terminal() {
     fi
 
     if [ -n "$font" ]; then
+        local family
         family=$(echo "$font" | sed 's/ [0-9]*$//')
         if ! fc-list 2>/dev/null | grep -qi "$family"; then
             bad "шрифта '$family' нет"
@@ -1409,6 +1846,8 @@ cmd_terminal() {
             if would "шрифт терминала $font"; then
                 :
             else
+                remember TERM_SYSFONT "$(gsettings get "$prof" use-system-font 2>/dev/null)"
+                remember TERM_FONT "$(gsettings get "$prof" font 2>/dev/null)"
                 gsettings set "$prof" use-system-font false 2>/dev/null
                 gsettings set "$prof" font "$font" 2>/dev/null
                 ok "шрифт: $font"
@@ -1429,7 +1868,7 @@ cmd_terminal() {
 # pywal дописывает в colors.sh строки со ссылками на несуществующие
 # переменные — под set -u подключение валит скрипт целиком.
 apply_wal_palette() {
-    prof="$1"
+    local prof="$1"
     local colors="$HOME/.cache/wal/colors.sh"
     if [ ! -f "$colors" ]; then
         bad "палитры pywal нет: $colors"
@@ -1441,6 +1880,10 @@ apply_wal_palette() {
     set +u
     . "$colors"
     set -u
+    remember TERM_THEMECOLORS "$(gsettings get "$prof" use-theme-colors 2>/dev/null)"
+    remember TERM_BG "$(gsettings get "$prof" background-color 2>/dev/null)"
+    remember TERM_FG "$(gsettings get "$prof" foreground-color 2>/dev/null)"
+    remember TERM_PALETTE "$(gsettings get "$prof" palette 2>/dev/null)"
     local pal="['$color0', '$color1', '$color2', '$color3', '$color4', '$color5', '$color6', '$color7', '$color8', '$color9', '$color10', '$color11', '$color12', '$color13', '$color14', '$color15']"
     gsettings set "$prof" use-theme-colors false 2>/dev/null
     gsettings set "$prof" background-color "$background" 2>/dev/null
@@ -1690,7 +2133,8 @@ PY
        justify-content:center;flex-direction:column;gap:34px;}
   .box{padding:30px 56px;border-radius:22px;background:rgba(0,0,0,.32);
        backdrop-filter:blur(14px);text-align:center;}
-  .clock{font-size:${clock}px;font-weight:600;color:#fff;letter-spacing:2px;line-height:1;}
+  .clock{font-size:${clock}px;font-weight:600;color:#fff;letter-spacing:2px;line-height:1;
+         text-shadow:0 2px 12px rgba(0,0,0,.55);}
   .date{font-size:24px;font-weight:600;color:#fff;opacity:.9;margin-top:8px;}
   .tiles{display:flex;flex-wrap:wrap;gap:14px;justify-content:center;max-width:900px;}
   .tile{width:${tile}px;padding:22px 10px;border-radius:16px;background:rgba(0,0,0,.32);
@@ -1701,8 +2145,10 @@ PY
        display:flex;align-items:center;justify-content:center;color:#fff;font-size:22px;font-weight:700;}
   .ico img{width:34px;height:34px;}
   .cap{font-size:16px;font-weight:700;color:#fff;max-width:116px;overflow:hidden;
-       text-overflow:ellipsis;white-space:nowrap;}
-  .hint{position:fixed;bottom:16px;right:20px;font-size:12px;color:#fff;opacity:.35;}
+       text-overflow:ellipsis;white-space:nowrap;text-shadow:0 1px 6px rgba(0,0,0,.6);}
+  /* Подсказка раньше была почти прозрачной и на светлой картинке исчезала. */
+  .hint{position:fixed;bottom:16px;right:20px;font-size:12px;color:#fff;opacity:.75;
+        background:rgba(0,0,0,.35);padding:4px 9px;border-radius:7px;}
   .toast{position:fixed;bottom:16px;left:20px;font-size:13px;color:#fff;opacity:0;
          background:rgba(0,0,0,.45);padding:7px 13px;border-radius:9px;transition:opacity .25s;}
 </style></head>
@@ -2120,30 +2566,47 @@ EOF
 }
 
 prune_wallpapers() {
-    walldir="$1"
-    keep="$2"
+    local walldir="$1"
+    local keep="$2"
     if ! is_number "$keep"; then
         die "prune: число"
     fi
-    have_now=$(find "$walldir" -maxdepth 1 -type f | wc -l)
+    # Только картинки: в каталоге обоев могут лежать заметки автора,
+    # список источников или что угодно ещё, и это не наш мусор.
+    local imgs
+    imgs=$(mktemp)
+    find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' \
+        -printf '%T@ %p\n' 2>/dev/null | sort -rn > "$imgs"
+    local have_now
+    have_now=$(wc -l < "$imgs")
     if [ "$have_now" -le "$keep" ]; then
         ok "в банке $have_now, удалять нечего"
         return 0
     fi
     local drop=$((have_now - keep))
     head1 "чистка банка"
+    local cur_wall
+    cur_wall=$(gsettings get org.gnome.desktop.background picture-uri 2>/dev/null | tr -d "'" | sed 's#^file://##')
     note "в банке $have_now, удалить $drop самых старых"
     if would "удалить $drop картинок"; then
         return 0
     fi
     if ! confirm "продолжить?"; then
         note "отменено"
+        rm -f "$imgs"
         return 0
     fi
-    ls -t "$walldir" | tail -n "$drop" | while read -r f; do
-        rm -f "$walldir/$f"
+    if [ -n "$cur_wall" ]; then
+        if tail -n "$drop" "$imgs" | cut -d' ' -f2- | grep -qxF "$cur_wall"; then
+            note "среди удаляемых текущие обои — ставлю следующие"
+            cmd_wall >/dev/null 2>&1
+        fi
+    fi
+    tail -n "$drop" "$imgs" | cut -d' ' -f2- | while read -r f; do
+        rm -f "$f"
     done
-    ok "удалено $drop, осталось $(find "$walldir" -maxdepth 1 -type f | wc -l)"
+    rm -f "$imgs"
+    ok "удалено $drop, осталось $(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)"
 }
 
 help_wall() {
@@ -2161,6 +2624,13 @@ wall — смена обоев по списку каталога
 
   Заодно обновляет палитру pywal и пересобирает страницу новой вкладки,
   чтобы её фон не совпал с рабочим столом.
+
+  ЧТО МЕНЯЕТСЯ ПОМИМО ОБОЕВ РАБОЧЕГО СТОЛА:
+    * обои экрана блокировки (screensaver picture-uri);
+    * режим вписывания picture-options становится zoom;
+    * цвета профиля GNOME Terminal — палитра идёт за картинкой, так что
+      настройки из terminal --palette будут перезаписаны;
+    * страница новой вкладки пересобирается с параметрами по умолчанию.
 EOF
 }
 
@@ -2417,6 +2887,10 @@ serve — отдать локальную страницу по http://localhost
   запрещает уходить оттуда к локальным файлам. По http ограничения нет.
 
   Слушает только 127.0.0.1 — из сети апка недоступна.
+
+  Служба ПОСТОЯННАЯ: это systemd-юнит с автозапуском при входе, а не
+  временный сервер на время сессии. Снять — serve --stop ИМЯ или
+  revert serve.
 EOF
 }
 
@@ -2579,7 +3053,32 @@ cmd_status() {
         note "виджет:        $(grep -m1 'local RADIUS' "$CONKY_LUA" | tr -d ' ')"
     fi
 
+    # Подсистемы, которых в срезе раньше не было вовсе
     echo
+    local prof
+    prof=$(term_profile)
+    if [ -n "$prof" ]; then
+        note "терминал:      прозрачность $(gsettings get "$prof" background-transparency-percent 2>/dev/null), своя палитра $(gsettings get "$prof" use-theme-colors 2>/dev/null)"
+    fi
+    if have dconf; then
+        note "тема оболочки: $(dconf read /org/gnome/shell/extensions/user-theme/name 2>/dev/null)"
+        note "панель:        прозрачность $(dconf read $DTP/trans-panel-opacity 2>/dev/null), размеры $(dconf read $DTP/panel-sizes 2>/dev/null)"
+    fi
+    local nkeys
+    nkeys=$(keys_list_paths | grep -c . 2>/dev/null)
+    note "свои клавиши:  $nkeys шт."
+    local nserve
+    nserve=$(ls "$HOME/.config/systemd/user"/desktop-kit-serve-*.service 2>/dev/null | grep -c . )
+    note "локальные апки: $nserve служб"
+    local napps
+    napps=$(grep -l 'GTK_THEME=' "$HOME/.local/share/applications"/*.desktop 2>/dev/null | grep -c . )
+    note "свои ярлыки:   $napps шт."
+
+    echo
+    if [ -f "$KIT_STATE" ]; then
+        note "наши последние настройки:"
+        sed 's/^/      /' "$KIT_STATE"
+    fi
     if [ -f "$BEFORE" ]; then
         note "что запомнено для отката:"
         sed 's/^/      /' "$BEFORE"
@@ -2601,20 +3100,211 @@ help_revert() {
 revert — вернуть как было
 
   desktop-kit revert              откатить всё
-  desktop-kit revert buttons      только кнопки
-  desktop-kit revert corners      только углы
-  desktop-kit revert widget       только виджет
-  desktop-kit revert theme        тему, значки, шрифт, схему
+  desktop-kit revert --list       что вообще можно откатить и что запомнено
+
+  По подсистемам:
+    app        свои ярлыки приложений с подменённой темой
+    keys       горячие клавиши, заведённые этим скриптом
+    serve      службы локальных апок
+    buttons    значки заголовка и их подсветка
+    corners    скругление окон
+    theme      тему окон, цветовую схему, тему оболочки
+    icons      тему значков (и снимает наследника со значками заголовка)
+    font       шрифт интерфейса, моноширинный, документов
+    widget     конфиг conky
+    terminal   прозрачность, шрифт и палитру GNOME Terminal
+    panel      прозрачность и высоту Dash to Panel
+    newtab     список ярлыков новой вкладки
+
+  Подсистемы независимы: revert theme НЕ трогает значки и шрифт, для них
+  свои подкоманды. Раньше было иначе, и откат темы уносил заодно значки.
 
   Возвращаются те значения, что были ДО первого изменения, а не
   умолчания системы: они записываются при первом запуске каждой команды.
+
+  Обои, банк картинок и расписание не откатываются никогда — это данные,
+  а не настройки вида.
 EOF
+}
+
+# Откат терминала. Вынесен в функцию, чтобы полный откат и отдельная
+# подкоманда не разъезжались: раньше revert all про панель просто забыл.
+revert_terminal() {
+    local prof
+    prof=$(term_profile)
+    if [ -z "$prof" ]; then
+        bad "профиль GNOME Terminal не найден"
+        return 1
+    fi
+    local tpair
+    local tkey
+    local tset
+    local tval
+    local tn=0
+    for tpair in "TERM_TRANSPARENT:use-transparent-background" \
+                 "TERM_OPACITY:background-transparency-percent" \
+                 "TERM_SYSFONT:use-system-font" \
+                 "TERM_FONT:font" \
+                 "TERM_THEMECOLORS:use-theme-colors" \
+                 "TERM_BG:background-color" \
+                 "TERM_FG:foreground-color" \
+                 "TERM_PALETTE:palette"; do
+        tkey="${tpair%%:*}"
+        tset="${tpair##*:}"
+        tval=$(recall "$tkey")
+        if [ -n "$tval" ]; then
+            gsettings set "$prof" "$tset" "$tval" 2>/dev/null
+            ok "$tset: $tval"
+            tn=$((tn + 1))
+        fi
+    done
+    if [ "$tn" = "0" ]; then
+        return 0
+    fi
+    if pgrep -x gnome-terminal-server >/dev/null 2>&1; then
+        note "перезапусти сервер: pkill -x gnome-terminal-server"
+    fi
+    return 0
+}
+
+revert_panel() {
+    local dtp_o
+    local dtp_s
+    dtp_o=$(recall DTP_OPACITY)
+    if [ -n "$dtp_o" ]; then
+        dconf write $DTP/trans-panel-opacity "$dtp_o" 2>/dev/null
+        ok "прозрачность панели: $dtp_o"
+    fi
+    dtp_s=$(recall DTP_SIZES)
+    if [ -n "$dtp_s" ]; then
+        dconf write $DTP/panel-sizes "'$dtp_s'" 2>/dev/null
+        ok "размеры панели восстановлены"
+    fi
+    return 0
+}
+
+# Свои ярлыки приложений: снимаем только те, где стоит наш GTK_THEME=.
+revert_app() {
+    local dir="$HOME/.local/share/applications"
+    local f
+    local n=0
+    if [ ! -d "$dir" ]; then
+        return 0
+    fi
+    for f in "$dir"/*.desktop; do
+        if [ ! -f "$f" ]; then
+            continue
+        fi
+        if grep -q 'GTK_THEME=' "$f"; then
+            rm -f "$f"
+            ok "убран свой ярлык: $(basename "$f")"
+            n=$((n + 1))
+        fi
+    done
+    if [ "$n" -gt 0 ]; then
+        if have update-desktop-database; then
+            update-desktop-database "$dir" >/dev/null 2>&1
+        fi
+    fi
+    return 0
+}
+
+# Горячие клавиши: снимаем ровно те пути, что заводили сами.
+revert_keys() {
+    local ours
+    ours=$(state_get KEYS_OURS)
+    if [ -z "$ours" ]; then
+        return 0
+    fi
+    local all
+    local keep=""
+    local p
+    local mine
+    all=$(keys_list_paths)
+    for p in $all; do
+        mine=0
+        for o in $ours; do
+            if [ "$o" = "$p" ]; then
+                mine=1
+            fi
+        done
+        if [ "$mine" = "1" ]; then
+            dconf reset -f "$p" 2>/dev/null
+            continue
+        fi
+        keep="$keep'$p', "
+    done
+    keep=$(echo "$keep" | sed 's/, $//')
+    if [ -z "$keep" ]; then
+        gsettings set "$KEYS_SCHEMA" custom-keybindings "[]" 2>/dev/null
+    else
+        gsettings set "$KEYS_SCHEMA" custom-keybindings "[$keep]" 2>/dev/null
+    fi
+    state_set KEYS_OURS ""
+    ok "свои горячие клавиши сняты"
+    return 0
+}
+
+# Локальные апки: юниты живут в systemd и переживают любой откат файлов.
+revert_serve() {
+    local unit_dir="$HOME/.config/systemd/user"
+    local f
+    local n
+    if [ ! -d "$unit_dir" ]; then
+        return 0
+    fi
+    for f in "$unit_dir"/desktop-kit-serve-*.service; do
+        if [ ! -f "$f" ]; then
+            continue
+        fi
+        n=$(basename "$f" .service)
+        systemctl --user disable --now "$n" >/dev/null 2>&1
+        rm -f "$f"
+        ok "служба остановлена: $n"
+    done
+    systemctl --user daemon-reload >/dev/null 2>&1
+    return 0
+}
+
+# Откат нескольких ключей org.gnome.desktop.interface разом.
+revert_gi_keys() {
+    local pair
+    local key
+    local setting
+    local value
+    for pair in "$@"; do
+        key="${pair%%:*}"
+        setting="${pair##*:}"
+        value=$(recall "$key")
+        if [ -n "$value" ]; then
+            gi_set "$setting" "$value"
+            ok "$setting: $value"
+        fi
+    done
 }
 
 cmd_revert() {
     local what="${1:-all}"
     case "$what" in
         -h|--help) help_revert; return 0 ;;
+        --list)
+            head1 "что можно откатить"
+            note "подсистемы: buttons corners theme icons font widget terminal"
+            note "            panel newtab app keys serve"
+            echo
+            if [ -f "$BEFORE" ]; then
+                note "запомнено на сейчас:"
+                sed 's/^/      /' "$BEFORE"
+            else
+                note "ничего не запомнено — команды ещё не запускались"
+            fi
+            echo
+            if [ -d "$BACKUP_DIR" ]; then
+                note "резервные копии файлов:"
+                ls "$BACKUP_DIR" 2>/dev/null | sed 's/^/      /'
+            fi
+            return 0
+            ;;
     esac
 
     head1 "откат: $what"
@@ -2643,28 +3333,32 @@ cmd_revert() {
         restore_backup "$CSS3" "gtk-3.0-gtk.css" blocks
         restore_backup "$CSS4" "gtk-4.0-gtk.css" blocks
 
-        local cur_icon=$(gi_get icon-theme)
+        local cur_icon
+        cur_icon=$(gi_get icon-theme)
         case "$cur_icon" in
-            *-dk-glyphs) rm -rf "$HOME/.local/share/icons/$cur_icon"; ok "тема значков удалена" ;;
+            *-dk-glyphs)
+                gi_set icon-theme "${cur_icon%-dk-glyphs}"
+                rm -rf "$HOME/.local/share/icons/$cur_icon"
+                ok "наследник со значками заголовка удалён"
+                ;;
         esac
 
-        for pair in "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
-                    "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name" \
-                    "MONOSPACE_FONT_NAME:monospace-font-name"; do
-            key="${pair%%:*}"
-            local setting="${pair##*:}"
-            value=$(recall "$key")
-            if [ -n "$value" ]; then
-                gi_set "$setting" "$value"
-                ok "$setting: $value"
-            fi
-        done
+        revert_gi_keys "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
+                       "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name" \
+                       "MONOSPACE_FONT_NAME:monospace-font-name" \
+                       "DOCUMENT_FONT_NAME:document-font-name"
 
         local shell_theme=$(recall SHELL_THEME)
         if [ -n "$shell_theme" ]; then
             dconf write /org/gnome/shell/extensions/user-theme/name "'$shell_theme'" 2>/dev/null
             ok "тема оболочки: $shell_theme"
         fi
+
+        revert_terminal
+        revert_panel
+        revert_app
+        revert_keys
+        revert_serve
 
         if restore_backup "$CONKY_CONF" "conky-main.conf"; then
             rm -f "$CONKY_LUA"
@@ -2677,6 +3371,7 @@ cmd_revert() {
         restart_gtk_apps
         echo
         note "обои, банк картинок и расписание не трогались"
+        note "тема, собранная через theme --install, осталась в ~/.themes"
         return 0
     fi
 
@@ -2686,15 +3381,16 @@ cmd_revert() {
             css_strip "$what" "$CSS4"
             ok "правила '$what' убраны"
             if [ "$what" = "buttons" ]; then
+                local cur_icon
                 cur_icon=$(gi_get icon-theme)
                 case "$cur_icon" in
                     *-dk-glyphs)
+                        # База зашита в самом имени наследника — это точнее,
+                        # чем запомненное значение: тему значков мог поменять
+                        # icons уже ПОСЛЕ установки кнопок.
+                        gi_set icon-theme "${cur_icon%-dk-glyphs}"
                         rm -rf "$HOME/.local/share/icons/$cur_icon"
-                        value=$(recall ICON_THEME)
-                        if [ -n "$value" ]; then
-                            gi_set icon-theme "$value"
-                            ok "тема значков: $value"
-                        fi
+                        ok "тема значков: ${cur_icon%-dk-glyphs}"
                         ;;
                 esac
             fi
@@ -2709,21 +3405,62 @@ cmd_revert() {
             fi
             ;;
         theme)
-            for pair in "GTK_THEME:gtk-theme" "ICON_THEME:icon-theme" \
-                        "COLOR_SCHEME:color-scheme" "FONT_NAME:font-name" \
-                        "MONOSPACE_FONT_NAME:monospace-font-name"; do
-                key="${pair%%:*}"
-                setting="${pair##*:}"
-                value=$(recall "$key")
-                if [ -n "$value" ]; then
-                    gi_set "$setting" "$value"
-                    ok "$setting: $value"
-                fi
-            done
+            # Только оформление окон. Значки и шрифт — свои подкоманды:
+            # человек, откатывающий тему, не просил трогать остальное.
+            revert_gi_keys "GTK_THEME:gtk-theme" "COLOR_SCHEME:color-scheme"
+            local shell_back
+            shell_back=$(recall SHELL_THEME)
+            if [ -n "$shell_back" ]; then
+                dconf write /org/gnome/shell/extensions/user-theme/name "'$shell_back'" 2>/dev/null
+                ok "тема оболочки: $shell_back"
+            fi
             restart_gtk_apps
             ;;
+        icons)
+            local cur_ico
+            cur_ico=$(gi_get icon-theme)
+            case "$cur_ico" in
+                *-dk-glyphs)
+                    rm -rf "$HOME/.local/share/icons/$cur_ico"
+                    ok "наследник со значками заголовка удалён"
+                    ;;
+            esac
+            revert_gi_keys "ICON_THEME:icon-theme"
+            restart_gtk_apps
+            ;;
+        font)
+            revert_gi_keys "FONT_NAME:font-name" \
+                           "MONOSPACE_FONT_NAME:monospace-font-name" \
+                           "DOCUMENT_FONT_NAME:document-font-name"
+            restart_gtk_apps
+            ;;
+        terminal)
+            revert_terminal
+            ;;
+        panel)
+            revert_panel
+            ;;
+        app)
+            revert_app
+            ;;
+        keys)
+            revert_keys
+            ;;
+        serve)
+            revert_serve
+            ;;
+        newtab)
+            if restore_backup "$NEWTAB_LINKS" "newtab-links.txt"; then
+                note "страницу пересобрать: $0 newtab"
+            else
+                bad "резервной копии списка ярлыков нет"
+            fi
+            ;;
         *)
-            die "revert: не знаю подсистемы '$what'"
+            bad "revert: не знаю подсистемы '$what'"
+            note "есть: buttons corners theme icons font widget terminal panel newtab"
+            note "или без аргумента — откатить всё"
+            return 1
             ;;
     esac
 }
@@ -2819,6 +3556,25 @@ keys_add() {
         die "keys: пустое сочетание"
     fi
 
+    # Повторный keys --defaults не должен плодить копии тех же сочетаний.
+    local exists
+    exists=""
+    for p in $(keys_list_paths); do
+        if [ "$(gsettings get "$KEYS_SCHEMA.custom-keybinding:$p" name 2>/dev/null | tr -d "'")" = "$name" ]; then
+            exists="$p"
+        fi
+    done
+    if [ -n "$exists" ]; then
+        note "сочетание '$name' уже есть — обновляю на месте"
+        if would "обновить сочетание $name"; then
+            return 0
+        fi
+        gsettings set "$KEYS_SCHEMA.custom-keybinding:$exists" command "$cmd" 2>/dev/null
+        gsettings set "$KEYS_SCHEMA.custom-keybinding:$exists" binding "$bind" 2>/dev/null
+        ok "$bind — $name"
+        return 0
+    fi
+
     if would "добавить сочетание $bind -> $cmd"; then
         return 0
     fi
@@ -2835,6 +3591,11 @@ keys_add() {
     done
 
     base="$KEYS_SCHEMA.custom-keybinding:$newpath"
+    # Помним, что добавили именно мы: иначе откат не отличит наши сочетания
+    # от тех, что человек завёл руками.
+    local ours
+    ours=$(state_get KEYS_OURS)
+    state_set KEYS_OURS "$ours $newpath"
     gsettings set "$base" name "$name" 2>/dev/null
     gsettings set "$base" command "$cmd" 2>/dev/null
     gsettings set "$base" binding "$bind" 2>/dev/null
@@ -2886,6 +3647,13 @@ keys_remove() {
     else
         gsettings set "$KEYS_SCHEMA" custom-keybindings "[$keep]" 2>/dev/null
     fi
+    # Убрать путь из списка мало: значения по нему остаются в dconf и
+    # всплывут, когда номер custom<N> переиспользуется.
+    for p in $paths; do
+        if [ "$(gsettings get "$KEYS_SCHEMA.custom-keybinding:$p" name 2>/dev/null | tr -d "'")" = "$target" ]; then
+            dconf reset -f "$p" 2>/dev/null
+        fi
+    done
     ok "убрано: $target"
 }
 
@@ -3155,6 +3923,65 @@ cmd_selftest() {
         fi
     done
     t_ok "проверка на !important выполнена"
+
+    # --- разбор имён тем: чистая логика, ничего не меняет ---
+    local vcase
+    local vgot
+    local vbad=0
+    for vcase in "Graphite-Dark:dark:Graphite" \
+                 "Graphite-Light:light:Graphite" \
+                 "Yaru-dark:dark:Yaru" \
+                 "Graphite-teal-Dark:dark:Graphite-teal" \
+                 "Adwaita:unknown:Adwaita" \
+                 "WhiteSur-Darker:dark:WhiteSur"; do
+        local nm="${vcase%%:*}"
+        local rest="${vcase#*:}"
+        local want_v="${rest%%:*}"
+        local want_b="${rest##*:}"
+        vgot=$(theme_variant_of "$nm")
+        if [ "$vgot" != "$want_v" ]; then
+            t_fail "разбор '$nm': вариант '$vgot', ожидался '$want_v'"
+            vbad=1
+        fi
+        vgot=$(theme_base_of "$nm")
+        if [ "$vgot" != "$want_b" ]; then
+            t_fail "разбор '$nm': база '$vgot', ожидалась '$want_b'"
+            vbad=1
+        fi
+    done
+    if [ "$vbad" = "0" ]; then
+        t_ok "имена тем разбираются верно (6 случаев)"
+    fi
+
+    # --- смогу ли я переключить эту систему на светлую ---
+    local cur_theme
+    local cur_variant
+    local pair_light
+    local pair_dark
+    cur_theme=$(gi_get gtk-theme)
+    cur_variant=$(theme_variant_of "$cur_theme")
+    pair_light=$(theme_find_variant "$(theme_base_of "$cur_theme")" light)
+    pair_dark=$(theme_find_variant "$(theme_base_of "$cur_theme")" dark)
+    t_ok "тема сейчас: $cur_theme (по имени — $cur_variant)"
+    if [ -n "$pair_light" ]; then
+        t_ok "светлый вариант есть: $pair_light  ->  $0 theme --light"
+    else
+        t_skip "светлого варианта нет — theme --light предложит список"
+    fi
+    if [ -n "$pair_dark" ]; then
+        t_ok "тёмный вариант есть: $pair_dark  ->  $0 theme --dark"
+    else
+        t_skip "тёмного варианта нет"
+    fi
+
+    # --- справка покрывает все команды ---
+    local help_out
+    help_out=$(cmd_help --settings 2>/dev/null)
+    if [ -n "$help_out" ]; then
+        t_ok "help --settings отдаёт перечень настроек"
+    else
+        t_fail "help --settings пуст"
+    fi
 
     # --- обои ---
     walldir=$(find_wallpaper_dir)
@@ -3454,14 +4281,106 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   --quiet      без вывода, только лог
 
   $0 help <команда>   подробности и все параметры
+  $0 help --all       ВСЯ справка разом, по всем командам
+  $0 help --settings  полный перечень изменяемых настроек
 
 Лог всех действий: $LOG_FILE
+EOF
+}
+
+help_settings() {
+    cat <<'EOF'
+Полный перечень того, что этот скрипт может изменить.
+Слева — команда, справа — конкретная настройка или файл.
+
+НАСТРОЙКИ GNOME (gsettings org.gnome.desktop.interface)
+  theme        gtk-theme                  тема окон
+  theme        color-scheme               светлая/тёмная схема
+  icons        icon-theme                 тема значков
+  buttons      icon-theme                 подменяет на своего наследника
+  font         font-name                  шрифт интерфейса
+  font         monospace-font-name        моноширинный
+  font         document-font-name         шрифт документов
+
+НАСТРОЙКИ ЧЕРЕЗ DCONF
+  theme        /org/gnome/shell/extensions/user-theme/name     тема оболочки
+  panel        /org/gnome/shell/extensions/dash-to-panel/
+                 trans-use-custom-opacity, trans-panel-opacity, panel-sizes
+  keys         /org/gnome/settings-daemon/plugins/media-keys/
+                 custom-keybindings и по одному пути на каждое сочетание
+
+ОБОИ
+  wall         org.gnome.desktop.background picture-uri
+  wall         org.gnome.desktop.background picture-uri-dark
+  wall         org.gnome.desktop.background picture-options = zoom
+  wall         org.gnome.desktop.screensaver picture-uri      экран блокировки
+
+ПРОФИЛЬ GNOME TERMINAL (профиль по умолчанию)
+  terminal     use-transparent-background, background-transparency-percent
+  terminal     use-system-font, font
+  terminal     use-theme-colors, background-color, foreground-color, palette
+  wall         те же цвета — при смене обоев палитра идёт следом
+
+ФАЙЛЫ
+  buttons      ~/.config/gtk-3.0/gtk.css      блок dk:buttons
+  buttons      ~/.config/gtk-4.0/gtk.css      блок dk:buttons
+  corners      те же два файла                блок dk:corners
+  buttons      ~/.local/share/icons/<база>-dk-glyphs/   тема-наследник
+  icons        сама тема Papirus на диске     цвет папок (--folders)
+  widget       ~/.config/conky/main.conf      подложка, цвет текста, lua
+  widget       ~/.config/conky/desktop-kit-bg.lua       отрисовка подложки
+  newtab       ~/.local/share/newtab/index.html, links.txt, icons.json
+  wallpapers   каталог обоев                  докачка и чистка
+  app          ~/.local/share/applications/<app>.desktop
+  (любая)      ~/bin/desktop-kit              копия себя для расписания
+
+СЛУЖБЫ SYSTEMD (пользовательские)
+  wallpapers   desktop-kit-wallpapers.service и .timer
+  serve        desktop-kit-serve-<имя>.service   постоянный, с автозапуском
+
+СЛУЖЕБНОЕ (можно удалять руками)
+  ~/.local/state/desktop-kit/before.env    как было до нас, основа отката
+  ~/.local/state/desktop-kit/state.env     наши последние настройки
+  ~/.local/state/desktop-kit/backups/      копии файлов до первой правки
+  ~/.local/state/desktop-kit/desktop-kit.log   лог всех действий
+  ~/.cache/desktop-kit/themes/             исходники собранных тем
+
+ЧЕГО СКРИПТ НЕ ДЕЛАЕТ
+  не ставит пакеты через apt, не трогает /etc, не меняет настройки входа,
+  не работает с сетью кроме wallhaven, GitHub и wttr.in.
+
+ТРЕБУЕТ ВНЕШНИХ ПРОГРАММ
+  buttons      curl                значки Fluent качаются с GitHub
+  icons        papirus-folders     только для --folders
+  theme        git, sassc          только для --install
+  widget       conky с поддержкой lua и cairo
+  terminal     pywal               только для --palette wal
+  newtab       python3             для значков из кэша Chrome
+  wallpapers   curl, jq, file
+  audit        python3
 EOF
 }
 
 cmd_help() {
     local topic="${1:-}"
     case "$topic" in
+        --settings|settings) help_settings; return 0 ;;
+        --all|all)
+            local topics="buttons corners theme icons font widget terminal"
+            topics="$topics newtab wallpapers wall serve app keys panel"
+            topics="$topics selftest revert"
+            usage
+            local one
+            for one in $topics; do
+                echo
+                echo "============================================================"
+                cmd_help "$one"
+            done
+            echo
+            echo "============================================================"
+            help_settings
+            return 0
+            ;;
         buttons)    help_buttons ;;
         corners)    help_corners ;;
         theme)      help_theme ;;
