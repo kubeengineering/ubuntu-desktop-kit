@@ -53,6 +53,11 @@ CONKY_LUA="$CONKY_DIR/desktop-kit-bg.lua"
 NEWTAB_DIR="$HOME/.local/share/newtab"
 NEWTAB_LINKS="$NEWTAB_DIR/links.txt"
 BIN_DIR="$HOME/bin"
+# Системные каталоги вынесены в переменные ради самопроверки: иначе тест
+# в песочнице видел бы настоящие темы и ярлыки машины и был бы неповторим.
+SYS_THEMES="${DK_SYS_THEMES:-/usr/share/themes}"
+SYS_ICONS="${DK_SYS_ICONS:-/usr/share/icons}"
+SYS_APPS="${DK_SYS_APPS:-/usr/share/applications}"
 
 FLUENT_ICONS="https://raw.githubusercontent.com/vinceliuice/Fluent-icon-theme/master/src/symbolic/actions"
 WALLHAVEN="https://wallhaven.cc/api/v1/search"
@@ -66,6 +71,17 @@ QUIET=0
 ok()   { if [ "$QUIET" = "0" ]; then echo "  ✓ $*"; fi; log "OK   $*"; }
 bad()  { echo "  ✗ $*" >&2; log "FAIL $*"; }
 note() { if [ "$QUIET" = "0" ]; then echo "    $*"; fi; log "     $*"; }
+# Пустая строка тоже вывод: голый echo пробивал --quiet.
+blank() { if [ "$QUIET" = "0" ]; then echo; fi; }
+# Многострочный вывод (списки тем, содержимое before.env) — тоже вывод,
+# и в тихом режиме его быть не должно.
+dump() {
+    if [ "$QUIET" = "0" ]; then
+        sed "s/^/      /"
+    else
+        cat > /dev/null
+    fi
+}
 # подсказка рядом с ошибкой: её нельзя терять даже в тихом режиме
 hint() { echo "    $*" >&2; log "     $*"; }
 head1() { if [ "$QUIET" = "0" ]; then echo "==> $*"; fi; log "=== $*"; }
@@ -122,6 +138,10 @@ backup_once() {
     local src="$1"
     local name="$2"
     local dst="$BACKUP_DIR/$name"
+    # В режиме проверки не создаём даже каталог: обещали не трогать диск.
+    if [ "$DRY_RUN" = "1" ]; then
+        return 0
+    fi
     mkdir -p "$BACKUP_DIR"
     if [ -e "$dst" ]; then
         return 0
@@ -204,6 +224,9 @@ KIT_STATE="$STATE_DIR/state.env"
 state_set() {
     local key="$1"
     local value="$2"
+    if [ "$DRY_RUN" = "1" ]; then
+        return 0
+    fi
     mkdir -p "$STATE_DIR"
     touch "$KIT_STATE"
     local tmp
@@ -231,6 +254,11 @@ state_get() {
 remember() {
     local key="$1"
     local value="$2"
+    # В режиме проверки не пишем ничего: иначе первый же --dry-run создавал
+    # бы снимок «как было», и настоящий запуск потом запоминал бы не то.
+    if [ "$DRY_RUN" = "1" ]; then
+        return 0
+    fi
     mkdir -p "$STATE_DIR"
     touch "$BEFORE"
     if grep -q "^$key=" "$BEFORE"; then
@@ -293,6 +321,14 @@ css_has() {
 untangle_css() {
     local file="$1"
     local label="$2"
+    # Раньше здесь безусловно делались rm и touch — из-за этого --dry-run
+    # создавал пустой gtk.css и сносил симлинк темы, ничего не спросив.
+    if [ "$DRY_RUN" = "1" ]; then
+        if [ -L "$file" ]; then
+            note "(проверка) сняли бы симлинк $file"
+        fi
+        return 0
+    fi
     if [ -L "$file" ]; then
         local target
         target=$(readlink -f "$file")
@@ -669,7 +705,7 @@ install_fluent_glyphs() {
     local dir="$HOME/.local/share/icons/$theme"
 
     src=""
-    for d in "$HOME/.local/share/icons/$base" "$HOME/.icons/$base" "/usr/share/icons/$base"; do
+    for d in "$HOME/.local/share/icons/$base" "$HOME/.icons/$base" "$SYS_ICONS/$base"; do
         if [ -d "$d" ]; then
             src="$d"
         fi
@@ -881,7 +917,7 @@ theme_repo_for() {
 }
 
 list_themes() {
-    for d in "$HOME/.themes" "$HOME/.local/share/themes" "/usr/share/themes"; do
+    for d in "$HOME/.themes" "$HOME/.local/share/themes" "$SYS_THEMES"; do
         if [ -d "$d" ]; then
             for t in "$d"/*; do
                 if [ -d "$t/gtk-3.0" ]; then
@@ -907,15 +943,34 @@ THEME_LIGHT_SUFFIXES="-Lighter -lighter -Light -light -LIGHT -White -white"
 # нашлось только без учёта регистра, полезнее подсказать точное имя,
 # чем сказать «темы нет».
 theme_exists() {
-    list_themes | grep -qx "$1"
+    # -F обязателен: имя темы это данные. Без него 'DKT.Dark' совпал бы
+    # с 'DKTxDark', и в настройки уехала бы несуществующая тема.
+    list_themes | grep -qxF -- "$1"
+}
+
+# Сочетание -i -x -F у grep ненадёжно (на части сборок процесс падает
+# с Aborted), поэтому регистр приводим сами, а сравниваем точно.
+lower() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]'; }
+
+theme_real_name() {
+    local want
+    want=$(lower "$1")
+    local th
+    list_themes | while read -r th; do
+        if [ "$(lower "$th")" = "$want" ]; then
+            printf '%s
+' "$th"
+        fi
+    done | head -1
 }
 
 theme_exists_ci() {
-    list_themes | grep -qix "$1"
-}
-
-theme_real_name() {
-    list_themes | grep -ix "$1" | head -1
+    local found
+    found=$(theme_real_name "$1")
+    if [ -n "$found" ]; then
+        return 0
+    fi
+    return 1
 }
 
 # Светлая тема, тёмная или по имени не понять.
@@ -1045,7 +1100,7 @@ theme_switch_variant() {
         note "  $0 theme --install $base$suffix"
     fi
     note "или возьми любую из установленных:"
-    theme_list_variants "$want" | sed 's/^/      /'
+    theme_list_variants "$want" | dump
     note "если нужно поменять только схему для GTK4-приложений:"
     note "  $0 theme $flag --scheme-only"
     return 1
@@ -1074,7 +1129,7 @@ cmd_theme() {
 
     if [ "$only_list" = "1" ]; then
         head1 "доступные темы"
-        list_themes | sed 's/^/    /'
+        list_themes | dump
         return 0
     fi
 
@@ -1111,7 +1166,7 @@ cmd_theme() {
             head1 "тема окон"
             note "сейчас: $(gi_get gtk-theme), схема $(gi_get color-scheme)"
             note "доступные:"
-            list_themes | sed 's/^/      /'
+            list_themes | dump
             note "применить: $0 theme ИМЯ"
             return 0
         fi
@@ -1150,7 +1205,7 @@ cmd_theme() {
                 note "  $0 theme --install $wanted"
             else
                 note "доступные темы:"
-                list_themes | sed 's/^/      /'
+                list_themes | dump
             fi
             return 1
         fi
@@ -1168,7 +1223,7 @@ cmd_theme() {
         # и в системном /usr/share/themes, а не только в домашнем.
         local shell_dir=""
         for d in "$HOME/.themes/$wanted" "$HOME/.local/share/themes/$wanted" \
-                 "/usr/share/themes/$wanted"; do
+                 "$SYS_THEMES/$wanted"; do
             if [ -d "$d/gnome-shell" ]; then
                 shell_dir="$d"
             fi
@@ -1212,7 +1267,7 @@ cmd_theme() {
     # Что за темой НЕ идёт: человек должен узнать это здесь, а не потом
     # по нечитаемому терминалу.
     if [ -n "$wanted" ]; then
-        echo
+        blank
         note "тема значков не менялась: $(gi_get icon-theme)"
         note "за темой сами НЕ идут:"
         note "  терминал   — $0 terminal --palette wal"
@@ -1342,7 +1397,7 @@ EOF
 }
 
 list_icon_themes() {
-    for d in "$HOME/.local/share/icons" "$HOME/.icons" "/usr/share/icons"; do
+    for d in "$HOME/.local/share/icons" "$HOME/.icons" "$SYS_ICONS"; do
         if [ -d "$d" ]; then
             for t in "$d"/*; do
                 if [ -f "$t/index.theme" ]; then
@@ -1354,6 +1409,7 @@ list_icon_themes() {
 }
 
 cmd_icons() {
+    local icons_rc=0
     local wanted=""
     local folders=""
     local only_list=0
@@ -1371,7 +1427,7 @@ cmd_icons() {
 
     if [ "$only_list" = "1" ]; then
         head1 "доступные темы значков"
-        list_icon_themes | sed 's/^/    /'
+        list_icon_themes | dump
         return 0
     fi
 
@@ -1415,7 +1471,7 @@ cmd_icons() {
         if ! list_icon_themes | grep -qx "$wanted"; then
             bad "темы значков '$wanted' нет"
             note "доступные:"
-            list_icon_themes | sed 's/^/      /'
+            list_icon_themes | dump
             return 1
         fi
         head1 "тема значков"
@@ -1423,11 +1479,18 @@ cmd_icons() {
         # Простая смена icon-theme снесла бы их молча, поэтому наследника
         # пересобираем поверх новой базы.
         local had_glyphs=0
-        case "$(gi_get icon-theme)" in
-            *-dk-glyphs) had_glyphs=1 ;;
+        local cur_icon_theme
+        cur_icon_theme=$(gi_get icon-theme)
+        case "$cur_icon_theme" in
+            *-dk-glyphs)
+                had_glyphs=1
+                # Запоминать наследника нельзя: откат вернул бы тему, каталог
+                # которой к тому моменту уже удалён. Помним его базу.
+                cur_icon_theme="${cur_icon_theme%-dk-glyphs}"
+                ;;
         esac
 
-        remember ICON_THEME "$(gi_get icon-theme)"
+        remember ICON_THEME "$cur_icon_theme"
         gi_set icon-theme "$wanted"
         ok "тема значков: $wanted"
 
@@ -1438,6 +1501,7 @@ cmd_icons() {
             else
                 bad "пересобрать не вышло — значки заголовка сейчас родные"
                 note "повтори позже: $0 buttons"
+                icons_rc=1
             fi
         else
             note "если нужны свои значки заголовка — $0 buttons"
@@ -1449,9 +1513,10 @@ cmd_icons() {
             head1 "значки"
             note "сейчас: $(gi_get icon-theme)"
             note "доступные:"
-            list_icon_themes | sed 's/^/      /'
+            list_icon_themes | dump
         fi
     fi
+    return $icons_rc
 }
 
 # =====================================================================
@@ -1487,7 +1552,7 @@ cmd_font() {
 
     if [ "$only_list" = "1" ]; then
         head1 "семейства шрифтов"
-        fc-list --format='%{family[0]}\n' 2>/dev/null | sort -u | sed 's/^/    /'
+        fc-list --format='%{family[0]}\n' 2>/dev/null | sort -u | dump
         return 0
     fi
 
@@ -1504,8 +1569,14 @@ cmd_font() {
     apply_font() {
         key="$1"
         value="$2"
-        local family=$(echo "$value" | sed 's/ [0-9]*$//')
-        if ! fc-list 2>/dev/null | grep -qi "$family"; then
+        local family
+        family=$(echo "$value" | sed 's/ [0-9]*$//')
+        # Сравниваем с полем "семейство" из fc-list, а не ищем подстроку
+        # где угодно в строке: иначе 'DejaV 11' сойдёт за существующий шрифт.
+        local want_family
+        want_family=$(lower "$family")
+        if ! fc-list : family 2>/dev/null | tr ',' '
+'              | tr '[:upper:]' '[:lower:]' | grep -qxF -- "$want_family"; then
             bad "шрифта '$family' в системе нет"
             note "посмотреть доступные: $0 font --list"
             return 1
@@ -1517,12 +1588,18 @@ cmd_font() {
     }
 
     head1 "шрифт интерфейса"
+    local rc=0
     if [ -n "$wanted" ]; then
-        apply_font font-name "$wanted"
+        if ! apply_font font-name "$wanted"; then
+            rc=1
+        fi
     fi
     if [ -n "$mono" ]; then
-        apply_font monospace-font-name "$mono"
+        if ! apply_font monospace-font-name "$mono"; then
+            rc=1
+        fi
     fi
+    return $rc
 }
 
 # =====================================================================
@@ -1896,6 +1973,30 @@ apply_wal_palette() {
 #  newtab — страница новой вкладки Chrome
 # =====================================================================
 
+# Запасной сборщик плиток, когда python3 недоступен. Значков из кэша
+# Chrome тут нет — только буква, зато страница не остаётся пустой.
+newtab_tiles_plain() {
+    local line
+    local name
+    local url
+    local letter
+    while IFS= read -r line; do
+        case "$line" in
+            ""|"#"*) continue ;;
+            *"|"*) : ;;
+            *) continue ;;
+        esac
+        name="${line%%|*}"
+        url="${line#*|}"
+        # Минимальное экранирование: эти четыре символа ломают разметку
+        name=$(printf '%s' "$name" | sed 's/&/\&amp;/g; s/</\&lt;/g; s/>/\&gt;/g; s/"/\&quot;/g')
+        url=$(printf '%s' "$url" | sed 's/&/\&amp;/g; s/"/\&quot;/g')
+        letter=$(printf '%s' "$name" | cut -c1 | tr '[:lower:]' '[:upper:]')
+        printf '<a class="tile" href="%s"><span class="ico">%s</span><span class="cap">%s</span></a>
+'             "$url" "$letter" "$name"
+    done < "$NEWTAB_LINKS"
+}
+
 help_newtab() {
     cat <<'EOF'
 newtab — своя страница новой вкладки в Chrome
@@ -1941,7 +2042,7 @@ cmd_newtab() {
     case "$action" in
         list)
             head1 "ярлыки новой вкладки"
-            grep -v '^#' "$NEWTAB_LINKS" | grep '|' | sed 's/^/    /'
+            grep -v '^#' "$NEWTAB_LINKS" | grep '|' | dump
             return 0
             ;;
         edit)
@@ -2045,7 +2146,16 @@ rebuild_newtab() {
         done
     fi
 
-    local tiles=$(python3 - "$NEWTAB_LINKS" "$favdb" "$NEWTAB_DIR/icons.json" <<'PY'
+    # Без python3 значки из кэша Chrome не достать. Раньше страница в этом
+    # случае молча собиралась ВООБЩЕ без плиток — то есть пустой. Теперь
+    # плитки строятся простыми средствами, с буквой вместо значка.
+    local tiles=""
+    if ! have python3; then
+        bad "python3 нет — значки из кэша Chrome недоступны"
+        note "плитки соберу без значков; поставить: sudo apt install python3"
+        tiles=$(newtab_tiles_plain)
+    else
+    tiles=$(python3 - "$NEWTAB_LINKS" "$favdb" "$NEWTAB_DIR/icons.json" <<'PY'
 import sys, html, os, base64, sqlite3, json
 
 links, favdb, cache_path = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -2123,6 +2233,7 @@ sys.stderr.write('    значки: из Chrome и кэша %d\n' % len(cache))
 print('\n'.join(rows))
 PY
 )
+    fi
 
     cat > "$NEWTAB_DIR/index.html" <<EOF
 <!doctype html>
@@ -2350,7 +2461,7 @@ cmd_wallpapers() {
             local unit="$HOME/.config/systemd/user/desktop-kit-wallpapers.timer"
             if [ -f "$unit" ]; then
                 note "расписание: $(grep '^OnCalendar' "$unit" | cut -d= -f2)"
-                systemctl --user list-timers desktop-kit-wallpapers.timer --no-pager 2>/dev/null | sed -n '2p' | sed 's/^/    /'
+                systemctl --user list-timers desktop-kit-wallpapers.timer --no-pager 2>/dev/null | sed -n '2p' | dump
             else
                 note "расписание: не настроено"
             fi
@@ -2360,7 +2471,7 @@ cmd_wallpapers() {
             head1 "запросы недели"
             note "разрешение: $(detect_resolution)"
             note "темы: $(week_themes)"
-            wallpaper_urls "$(detect_resolution)" | sed 's/^/    /'
+            wallpaper_urls "$(detect_resolution)" | dump
             return 0
             ;;
         timer)
@@ -2562,7 +2673,7 @@ EOF
     systemctl --user daemon-reload 2>/dev/null
     systemctl --user enable --now "$name.timer" >/dev/null 2>&1
     ok "расписание: $day в $at, по 10 картинок"
-    systemctl --user list-timers "$name.timer" --no-pager 2>/dev/null | sed -n '1,2p' | sed 's/^/    /'
+    systemctl --user list-timers "$name.timer" --no-pager 2>/dev/null | sed -n '1,2p' | dump
 }
 
 prune_wallpapers() {
@@ -2775,14 +2886,14 @@ cmd_app() {
     fi
 
     src=""
-    for f in "/usr/share/applications/org.gnome.$(echo "$app" | sed 's/^./\U&/').desktop" \
-             "/usr/share/applications/$app.desktop"; do
+    for f in "$SYS_APPS/org.gnome.$(echo "$app" | sed 's/^./\U&/').desktop" \
+             "$SYS_APPS/$app.desktop"; do
         if [ -f "$f" ]; then
             src="$f"
         fi
     done
     if [ -z "$src" ]; then
-        found=$(ls /usr/share/applications/ 2>/dev/null | grep -i "$app" | head -3)
+        found=$(ls "$SYS_APPS/" 2>/dev/null | grep -i "$app" | head -3)
         bad "ярлык приложения '$app' не найден"
         if [ -n "$found" ]; then
             note "похожие: $found"
@@ -2945,7 +3056,7 @@ cmd_serve() {
     if [ ! -f "$path/index.html" ]; then
         bad "в каталоге нет index.html"
         note "что там лежит:"
-        ls "$path" | sed 's/^/      /'
+        ls "$path" | dump
         return 1
     fi
     if ! is_number "$port"; then
@@ -2964,7 +3075,7 @@ cmd_serve() {
             systemctl --user stop "$unit.service" 2>/dev/null
         else
             bad "порт $port занят чужим процессом"
-            ss -ltnp 2>/dev/null | grep ":$port " | sed 's/^/      /'
+            ss -ltnp 2>/dev/null | grep ":$port " | dump
             note "возьми другой: $0 serve \"$path\" --port 8801"
             return 1
         fi
@@ -3015,7 +3126,7 @@ cmd_status() {
     note "шрифт:         $(gi_get font-name)"
     note "моноширинный:  $(gi_get monospace-font-name)"
 
-    echo
+    blank
     for f in "$CSS3" "$CSS4"; do
         local label=$(basename "$(dirname "$f")")
         if [ -L "$f" ]; then
@@ -3037,7 +3148,7 @@ cmd_status() {
         fi
     done
 
-    echo
+    blank
     walldir=$(find_wallpaper_dir)
     if [ -d "$walldir" ]; then
         n=$(find "$walldir" -maxdepth 1 -type f -iregex '.*\.\(jpg\|jpeg\|png\|webp\)' 2>/dev/null | wc -l)
@@ -3054,7 +3165,7 @@ cmd_status() {
     fi
 
     # Подсистемы, которых в срезе раньше не было вовсе
-    echo
+    blank
     local prof
     prof=$(term_profile)
     if [ -n "$prof" ]; then
@@ -3074,14 +3185,14 @@ cmd_status() {
     napps=$(grep -l 'GTK_THEME=' "$HOME/.local/share/applications"/*.desktop 2>/dev/null | grep -c . )
     note "свои ярлыки:   $napps шт."
 
-    echo
+    blank
     if [ -f "$KIT_STATE" ]; then
         note "наши последние настройки:"
-        sed 's/^/      /' "$KIT_STATE"
+        dump < "$KIT_STATE"
     fi
     if [ -f "$BEFORE" ]; then
         note "что запомнено для отката:"
-        sed 's/^/      /' "$BEFORE"
+        dump < "$BEFORE"
     else
         note "снимка исходных настроек нет — откатывать нечего"
     fi
@@ -3294,14 +3405,14 @@ cmd_revert() {
             echo
             if [ -f "$BEFORE" ]; then
                 note "запомнено на сейчас:"
-                sed 's/^/      /' "$BEFORE"
+                dump < "$BEFORE"
             else
                 note "ничего не запомнено — команды ещё не запускались"
             fi
             echo
             if [ -d "$BACKUP_DIR" ]; then
                 note "резервные копии файлов:"
-                ls "$BACKUP_DIR" 2>/dev/null | sed 's/^/      /'
+                ls "$BACKUP_DIR" 2>/dev/null | dump
             fi
             return 0
             ;;
@@ -3312,7 +3423,7 @@ cmd_revert() {
     if [ "$DRY_RUN" = "1" ]; then
         note "(проверка) было бы возвращено:"
         if [ -f "$BEFORE" ]; then
-            sed 's/^/      /' "$BEFORE"
+            dump < "$BEFORE"
         else
             note "      снимка исходных настроек нет"
         fi
@@ -3369,7 +3480,7 @@ cmd_revert() {
 
         rm -f "$BEFORE"
         restart_gtk_apps
-        echo
+        blank
         note "обои, банк картинок и расписание не трогались"
         note "тема, собранная через theme --install, осталась в ~/.themes"
         return 0
@@ -3811,35 +3922,523 @@ help_selftest() {
 selftest — проверить себя прямо на этой машине
 
   desktop-kit selftest            безопасные проверки, ничего не меняет
-  desktop-kit selftest --full     плюс применение и откат каждой подсистемы
+  desktop-kit selftest --full     плюс применение и откат каждой команды
+  desktop-kit selftest --only ИМЯ прогнать одну группу
+  desktop-kit selftest --list     список групп
 
-  Безопасный режим: разбор аргументов, наличие инструментов, доступность
-  сети и wallhaven, чтение кэша значков Chrome, состояние файлов.
+  Безопасный режим (около 40 проверок): окружение и внешние программы,
+  разбор аргументов, состояние gtk.css (симлинк, !important), банк обоев,
+  разбор имён тем, наличие светлого и тёмного варианта ТЕКУЩЕЙ темы,
+  доступность wallhaven и GitHub, читаемость кэша значков Chrome.
 
-  Полный режим дополнительно применяет каждую подсистему, проверяет
-  результат и откатывает. Занимает пару минут.
+  Полный режим (около 190 проверок) прогоняет КАЖДУЮ команду и смотрит
+  на результат: содержимое CSS, значения ключей, созданные файлы и юниты,
+  коды возврата, тексты отказов. Занимает пару минут.
 
-  В конце рядом кладётся архив с логами и снимком системы — его можно
-  переслать целиком.
+  Почему это безопасно. Подмены HOME недостаточно: gsettings и dconf
+  ходят в базу пользователя через D-Bus мимо любого HOME, и прогон
+  «в песочнице» менял бы живые настройки. Поэтому все внешние программы,
+  которые что-то меняют — gsettings, dconf, systemctl, curl, conky,
+  papirus-folders, pkill — подменяются заглушками, и скрипт видит только
+  их. Ни одна настройка машины при этом не трогается, сеть не нужна.
+
+  Группы: core buttons corners theme icons font widget terminal newtab
+  wall wallpapers keys panel app serve revert help
+
+  В конце рядом ложится ~/desktop-kit-selftest.tar.gz — отчёт с причиной
+  каждого провала (что ожидалось, что получено), список внешних программ,
+  снимок состояния, обе gtk.css и лог. Его можно переслать целиком.
+
+  DK_KEEP_SANDBOX=1 оставляет каталоги песочниц после прогона, если надо
+  посмотреть, что именно получилось.
 EOF
+}
+
+# =====================================================================
+#  Каркас самопроверки: песочница с подставными внешними программами
+# =====================================================================
+#
+# Подмены HOME НЕДОСТАТОЧНО. gsettings и dconf пишут в базу пользователя
+# через D-Bus, и служба dconf была запущена с настоящим HOME — то есть
+# «проверка в песочнице» меняла бы живые настройки. Хуже того: buttons
+# ставит тему значков, каталог которой лежит в песочнице, а песочница
+# после теста удаляется — у человека осталась бы тема, указывающая в
+# никуда.
+#
+# Поэтому все внешние программы, которые что-то МЕНЯЮТ, подменяются
+# заглушками в отдельном каталоге, и он ставится первым в PATH.
+
+SB=""
+SB_BIN=""
+SB_STORE=""
+SB_OUT=""
+SB_RC=0
+
+sb_write_stub() {
+    local name="$1"
+    local body="$2"
+    printf '#!/usr/bin/env bash\n%s\n' "$body" > "$SB_BIN/$name"
+    chmod +x "$SB_BIN/$name"
+}
+
+sandbox_new() {
+    SB=$(mktemp -d)
+    SB_BIN="$SB/stub-bin"
+    SB_STORE="$SB/stub-store"
+    SB_OUT="$SB/last-output.txt"
+    mkdir -p "$SB_BIN" "$SB_STORE" "$SB/.config" "$SB/.local/share" \
+             "$SB/.local/state" "$SB/.cache" \
+             "$SB/sys/themes" "$SB/sys/icons" "$SB/sys/applications"
+
+    # --- gsettings: ключи хранятся как "схема|ключ=значение" ----------
+    sb_write_stub gsettings '
+S="$DK_STUB_STORE/gsettings"
+Q=$(printf "\047")
+touch "$S"
+if [ "$1" = "set" ]; then
+    K="$2|$3"
+    shift 3
+    grep -v "^$K=" "$S" > "$S.t" 2>/dev/null
+    mv "$S.t" "$S"
+    printf "%s=%s\n" "$K" "$*" >> "$S"
+    exit 0
+fi
+if [ "$1" = "get" ]; then
+    K="$2|$3"
+    V=$(grep "^$K=" "$S" | tail -1 | cut -d= -f2-)
+    if [ -z "$V" ]; then
+        exit 0
+    fi
+    case "$V" in
+        \[*)        printf "%s\n" "$V" ;;
+        true|false) printf "%s\n" "$V" ;;
+        "$Q"*)     printf "%s\n" "$V" ;;
+        *[!0-9]*)   printf "%s%s%s\n" "$Q" "$V" "$Q" ;;
+        *)          printf "%s\n" "$V" ;;
+    esac
+    exit 0
+fi
+if [ "$1" = "reset" ]; then
+    K="$2|$3"
+    grep -v "^$K=" "$S" > "$S.t" 2>/dev/null
+    mv "$S.t" "$S"
+fi
+exit 0'
+
+    # --- dconf: строки "путь значение" --------------------------------
+    sb_write_stub dconf '
+D="$DK_STUB_STORE/dconf"
+touch "$D"
+if [ "$1" = "write" ]; then
+    grep -v "^$2 " "$D" > "$D.t" 2>/dev/null
+    mv "$D.t" "$D"
+    printf "%s %s\n" "$2" "$3" >> "$D"
+    exit 0
+fi
+if [ "$1" = "read" ]; then
+    grep "^$2 " "$D" | tail -1 | cut -d" " -f2-
+    exit 0
+fi
+if [ "$1" = "reset" ]; then
+    P="$3"
+    if [ "$2" != "-f" ]; then
+        P="$2"
+    fi
+    grep -v "^$P" "$D" > "$D.t" 2>/dev/null
+    mv "$D.t" "$D"
+fi
+exit 0'
+
+    # --- curl: отдаёт то, что просят, никуда не ходя ------------------
+    # Разбирает -o ФАЙЛ, -O, -w ФОРМАТ и URL. Значки отдаёт валидным SVG,
+    # wallhaven — правдоподобным JSON, картинки — телом JPEG.
+    sb_write_stub curl '
+OUT=""
+USE_O=0
+FMT=""
+URL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) OUT="$2"; shift 2 ;;
+        -O) USE_O=1; shift ;;
+        -w) FMT="$2"; shift 2 ;;
+        http://*|https://*) URL="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+echo "$URL" >> "$DK_STUB_STORE/curl.log"
+BODY=""
+case "$URL" in
+    *window-*-symbolic.svg)
+        BODY="<svg xmlns=\"http://www.w3.org/2000/svg\" width=\"16\" height=\"16\"></svg>" ;;
+    *wallhaven*)
+        BODY="{\"data\":[{\"path\":\"https://w.example/full/aa/wallhaven-t1.jpg\"},{\"path\":\"https://w.example/full/bb/wallhaven-t2.jpg\"},{\"path\":\"https://w.example/full/cc/wallhaven-t3.jpg\"}]}" ;;
+    *.jpg|*.jpeg|*.png|*.webp)
+        BODY="$(printf "\377\330\377\340JFIF-заглушка")" ;;
+    http://localhost*|http://127.0.0.1*)
+        BODY="ok" ;;
+    *)
+        BODY="ok" ;;
+esac
+if [ "$USE_O" = "1" ]; then
+    printf "%s" "$BODY" > "$(basename "$URL")"
+else
+    if [ -n "$OUT" ]; then
+        printf "%s" "$BODY" > "$OUT"
+    else
+        printf "%s" "$BODY"
+    fi
+fi
+if [ -n "$FMT" ]; then
+    printf "200"
+fi
+exit 0'
+
+    # --- file: тип по расширению --------------------------------------
+    sb_write_stub file '
+F=""
+for a in "$@"; do
+    case "$a" in -*) : ;; *) F="$a" ;; esac
+done
+case "$F" in
+    *.jpg|*.jpeg) echo "image/jpeg" ;;
+    *.png)        echo "image/png" ;;
+    *.webp)       echo "image/webp" ;;
+    *)            echo "text/plain" ;;
+esac
+exit 0'
+
+    # --- systemd: только записываем, что просили -----------------------
+    sb_write_stub systemctl '
+echo "$*" >> "$DK_STUB_STORE/systemctl.log"
+case "$*" in
+    *is-system-running*) echo running ;;
+    *is-active*)         exit 3 ;;
+esac
+exit 0'
+
+    sb_write_stub pgrep 'exit 1'
+    sb_write_stub pkill 'exit 0'
+    for prog in nautilus conky notify-send gtk-update-icon-cache \
+                update-desktop-database xdg-open gnome-terminal; do
+        sb_write_stub "$prog" 'exit 0'
+    done
+    sb_write_stub papirus-folders '
+echo "$*" >> "$DK_STUB_STORE/papirus.log"
+exit 0'
+    sb_write_stub fc-list '
+case "$*" in
+    *family*)
+        echo "Cantarell"
+        echo "JetBrainsMono Nerd Font,JetBrainsMono NF"
+        echo "Monospace"
+        ;;
+    *)
+        echo "/usr/share/fonts/Cantarell:Cantarell:style=Regular"
+        echo "/usr/share/fonts/JetBrains:JetBrainsMono Nerd Font:style=Regular"
+        ;;
+esac
+exit 0'
+    sb_write_stub git '
+echo "$*" >> "$DK_STUB_STORE/git.log"
+exit 0'
+    sb_write_stub sassc 'exit 0'
+
+    # --- заготовки окружения ------------------------------------------
+    mkdir -p "$SB/.config/gtk-3.0" "$SB/.config/conky" "$SB/.themes" \
+             "$SB/.local/share/icons" "$SB/.local/share/newtab" \
+             "$SB/.local/share/applications" "$SB/Pictures/wallpapers" \
+             "$SB/.cache/wal" "$SB/bin"
+
+    printf '/* чужое правило */\nwindow { color: red; }\n' > "$SB/.config/gtk-3.0/gtk.css"
+    printf "conky.config = {\n    own_window_argb_value = 225,\n    own_window_colour = '1e1e2e',\n    default_color = 'ffffff',\n}\nconky.text = [[\${time %%H:%%M}]]\n" \
+        > "$SB/.config/conky/main.conf"
+    printf 'Тест|https://example.com\n' > "$SB/.local/share/newtab/links.txt"
+
+    local i
+    for i in 1 2 3 4 5; do
+        printf '\377\330\377\340JFIF' > "$SB/Pictures/wallpapers/w$i.jpg"
+    done
+    printf 'заметка автора, не картинка\n' > "$SB/Pictures/wallpapers/sources.txt"
+
+    # темы: пара вариантов и одиночка
+    local th
+    for th in Graphite-Dark Graphite-Light Yaru Yaru-dark Loner-Dark; do
+        mkdir -p "$SB/.themes/$th/gtk-3.0"
+    done
+    mkdir -p "$SB/.themes/Graphite-Light/gnome-shell"
+
+    # темы значков
+    for th in Adwaita Papirus Papirus-Dark; do
+        mkdir -p "$SB/.local/share/icons/$th"
+        printf '[Icon Theme]\nName=%s\n' "$th" > "$SB/.local/share/icons/$th/index.theme"
+    done
+
+    # палитра pywal
+    printf "background='#101014'\nforeground='#e8e8e8'\n" > "$SB/.cache/wal/colors.sh"
+    for i in 0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+        printf "color%s='#1%s1%s1%s'\n" "$i" "$i" "$i" "$i" >> "$SB/.cache/wal/colors.sh"
+    done
+
+    # чужой ярлык приложения — его трогать нельзя
+    printf '[Desktop Entry]\nName=Чужое\nExec=chuzhoe %%U\nType=Application\n' \
+        > "$SB/.local/share/applications/chuzhoe.desktop"
+
+    # исходные значения настроек
+    sb_set org.gnome.desktop.interface gtk-theme "Graphite-Dark"
+    sb_set org.gnome.desktop.interface icon-theme "Adwaita"
+    sb_set org.gnome.desktop.interface color-scheme "prefer-dark"
+    sb_set org.gnome.desktop.interface font-name "Cantarell 11"
+    sb_set org.gnome.desktop.interface monospace-font-name "Monospace 10"
+    sb_set org.gnome.Terminal.ProfilesList default "b1-профиль"
+    sb_set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:b1-профиль/" background-transparency-percent "0"
+    sb_set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:b1-профиль/" use-system-font "true"
+    sb_set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:b1-профиль/" font "'Monospace 12'"
+    sb_set "org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:b1-профиль/" use-theme-colors "true"
+    sb_set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "@as []"
+}
+
+# записать значение в хранилище заглушки напрямую
+sb_set() {
+    local key="$1|$2"
+    shift 2
+    mkdir -p "$SB_STORE"
+    touch "$SB_STORE/gsettings"
+    grep -v "^$key=" "$SB_STORE/gsettings" > "$SB_STORE/gsettings.t" 2>/dev/null
+    mv "$SB_STORE/gsettings.t" "$SB_STORE/gsettings"
+    printf '%s=%s\n' "$key" "$*" >> "$SB_STORE/gsettings"
+}
+
+# прочитать значение из хранилища заглушки
+sb_get() {
+    local key="$1|$2"
+    if [ ! -f "$SB_STORE/gsettings" ]; then
+        return 0
+    fi
+    grep "^$key=" "$SB_STORE/gsettings" | tail -1 | cut -d= -f2- | tr -d "'"
+}
+
+sb_dconf() {
+    if [ ! -f "$SB_STORE/dconf" ]; then
+        return 0
+    fi
+    grep "^$1 " "$SB_STORE/dconf" | tail -1 | cut -d' ' -f2- | tr -d "'"
+}
+
+# запустить скрипт внутри песочницы; вывод в $SB_OUT, код в $SB_RC
+sandbox_run() {
+    SB_RC=0
+    env -i \
+        HOME="$SB" \
+        USER="${USER:-tester}" \
+        PATH="$SB_BIN:/usr/local/bin:/usr/bin:/bin" \
+        LANG="${LANG:-C.UTF-8}" \
+        TERM="${TERM:-dumb}" \
+        DK_STUB_STORE="$SB_STORE" \
+        XDG_CONFIG_HOME="$SB/.config" \
+        XDG_DATA_HOME="$SB/.local/share" \
+        XDG_STATE_HOME="$SB/.local/state" \
+        XDG_CACHE_HOME="$SB/.cache" \
+        DCONF_PROFILE="$SB/dconf-profile" \
+        DK_SYS_THEMES="$SB/sys/themes" \
+        DK_SYS_ICONS="$SB/sys/icons" \
+        DK_SYS_APPS="$SB/sys/applications" \
+        DBUS_SESSION_BUS_ADDRESS="disabled:" \
+        bash "$SELF" --yes "$@" > "$SB_OUT" 2>&1
+    SB_RC=$?
+    return 0
+}
+
+sandbox_drop() {
+    if [ -n "$SB" ]; then
+        # DK_KEEP_SANDBOX=1 оставляет каталог для вскрытия после провала
+        if [ "${DK_KEEP_SANDBOX:-0}" = "1" ]; then
+            note "песочница оставлена: $SB"
+        else
+            rm -rf "$SB"
+        fi
+    fi
+    SB=""
+}
+
+# --------------------------------------------------------- утверждения
+
+# Каждое утверждение при провале печатает, что ожидалось и что получено:
+# иначе по логу с чужой машины дефект не воспроизвести.
+
+t_eq() {
+    local name="$1"
+    local want="$2"
+    local got="$3"
+    if [ "$want" = "$got" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "ожидалось: [$want]"
+    t_detail "получено:  [$got]"
+    return 1
+}
+
+t_ne() {
+    local name="$1"
+    local bad_value="$2"
+    local got="$3"
+    if [ "$bad_value" != "$got" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "значение не должно было остаться: [$got]"
+    return 1
+}
+
+t_has() {
+    local name="$1"
+    local file="$2"
+    local needle="$3"
+    if [ ! -f "$file" ]; then
+        t_fail "$name"
+        t_detail "файла нет: $file"
+        return 1
+    fi
+    if grep -qF -- "$needle" "$file"; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "в $file не найдено: [$needle]"
+    t_detail "первые строки файла:"
+    head -5 "$file" | sed 's/^/        /' >> "$TEST_DETAIL_FILE"
+    return 1
+}
+
+t_hasnt() {
+    local name="$1"
+    local file="$2"
+    local needle="$3"
+    if [ ! -f "$file" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    if grep -qF -- "$needle" "$file"; then
+        t_fail "$name"
+        t_detail "в $file обнаружено лишнее: [$needle]"
+        grep -nF -- "$needle" "$file" | head -3 | sed 's/^/        /' >> "$TEST_DETAIL_FILE"
+        return 1
+    fi
+    t_ok "$name"
+    return 0
+}
+
+t_out_has() {
+    local name="$1"
+    local needle="$2"
+    if grep -qF -- "$needle" "$SB_OUT"; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "в выводе команды нет: [$needle]"
+    t_detail "вывод был:"
+    sed 's/^/        /' "$SB_OUT" | head -12 >> "$TEST_DETAIL_FILE"
+    return 1
+}
+
+t_rc() {
+    local name="$1"
+    local want="$2"
+    if [ "$SB_RC" = "$want" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "код возврата $SB_RC, ожидался $want"
+    t_detail "вывод команды:"
+    sed 's/^/        /' "$SB_OUT" | head -12 >> "$TEST_DETAIL_FILE"
+    return 1
+}
+
+t_rc_not() {
+    local name="$1"
+    if [ "$SB_RC" != "0" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "команда вернула успех, а должна была отказать"
+    sed 's/^/        /' "$SB_OUT" | head -12 >> "$TEST_DETAIL_FILE"
+    return 1
+}
+
+t_file() {
+    local name="$1"
+    local file="$2"
+    if [ -f "$file" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "файл не создан: $file"
+    return 1
+}
+
+t_nofile() {
+    local name="$1"
+    local file="$2"
+    if [ ! -e "$file" ]; then
+        t_ok "$name"
+        return 0
+    fi
+    t_fail "$name"
+    t_detail "файл должен был исчезнуть: $file"
+    return 1
 }
 
 TEST_PASS=0
 TEST_FAIL=0
+TEST_SKIP=0
 TEST_LOG=""
+TEST_GROUP=""
+TEST_DETAIL_FILE="/dev/null"
+
+t_group() {
+    TEST_GROUP="$1"
+    blank
+    echo "  -- $1"
+    TEST_LOG="$TEST_LOG
+
+-- $1"
+}
 
 t_ok()   { TEST_PASS=$((TEST_PASS + 1)); echo "  OK   $*"; TEST_LOG="$TEST_LOG
 OK   $*"; }
 t_fail() { TEST_FAIL=$((TEST_FAIL + 1)); echo "  FAIL $*"; TEST_LOG="$TEST_LOG
-FAIL $*"; }
-t_skip() { echo "  --   $* (пропущено)"; TEST_LOG="$TEST_LOG
+FAIL $*"
+    printf 'FAIL [%s] %s
+' "$TEST_GROUP" "$*" >> "$TEST_DETAIL_FILE"
+}
+t_skip() { TEST_SKIP=$((TEST_SKIP + 1)); echo "  --   $* (пропущено)"; TEST_LOG="$TEST_LOG
 SKIP $*"; }
+
+# Подробность к упавшей проверке: без неё лог с чужой машины бесполезен —
+# видно ЧТО упало, но не видно ПОЧЕМУ.
+t_detail() {
+    echo "       $*"
+    TEST_LOG="$TEST_LOG
+       $*"
+    printf '       %s
+' "$*" >> "$TEST_DETAIL_FILE"
+}
 
 cmd_selftest() {
     local full=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --full)    full=1; shift ;;
+            --only)    need_args "--only" 2 "$#"; full=1; SELFTEST_ONLY="$2"; shift 2 ;;
+            --list)    echo "$SELFTEST_GROUPS" | tr ' ' '
+'; return 0 ;;
             -h|--help) help_selftest; return 0 ;;
             *) die "selftest: неизвестный параметр $1" ;;
         esac
@@ -3849,6 +4448,8 @@ cmd_selftest() {
     local report_dir="$HOME/desktop-kit-selftest"
     rm -rf "$report_dir"
     mkdir -p "$report_dir"
+    TEST_DETAIL_FILE="$report_dir/подробности-провалов.txt"
+    : > "$TEST_DETAIL_FILE"
 
     head1 "самопроверка (безопасная часть)"
 
@@ -4071,29 +4672,70 @@ PY
 
     # --- полный режим ---
     if [ "$full" = "1" ]; then
-        echo
+        blank
         head1 "самопроверка (полная: применение и откат)"
         selftest_full
     fi
 
     # --- отчёт ---
-    echo
+    # Внутри этого блока пишем echo, а не blank: он формирует ФАЙЛ отчёта,
+    # и в тихом режиме файл не должен становиться пустым.
+    blank
     head1 "отчёт"
-    local finished=$(date '+%Y-%m-%d %H:%M:%S')
+    local finished
+    finished=$(date '+%Y-%m-%d %H:%M:%S')
 
     {
         echo "# Самопроверка desktop-kit"
         echo
-        echo "- версия: $VERSION"
-        echo "- начато:  $started"
+        echo "- версия скрипта: $VERSION"
+        echo "- начато:    $started"
         echo "- закончено: $finished"
-        echo "- прошло проверок: $TEST_PASS"
+        echo "- прошло:    $TEST_PASS"
         echo "- провалено: $TEST_FAIL"
+        echo "- пропущено: $TEST_SKIP"
+        if [ "$full" = "1" ]; then
+            echo "- режим: полный (применение и откат в песочнице)"
+        else
+            echo "- режим: безопасный (ничего не менялось)"
+        fi
         echo
-        echo '## Результаты'
+        if [ "$TEST_FAIL" -gt 0 ]; then
+            echo '## Что упало и почему'
+            echo
+            echo '```'
+            cat "$TEST_DETAIL_FILE"
+            echo '```'
+            echo
+        fi
+        echo '## Все проверки по порядку'
         echo
         echo '```'
-        printf '%s\n' "$TEST_LOG"
+        printf '%s
+' "$TEST_LOG"
+        echo '```'
+        echo
+        echo '## Окружение'
+        echo
+        echo '```'
+        echo "система:   $(uname -srm 2>/dev/null)"
+        if [ -r /etc/os-release ]; then
+            grep '^PRETTY_NAME' /etc/os-release 2>/dev/null
+        fi
+        echo "оболочка:  $BASH_VERSION"
+        echo "локаль:    ${LANG:-не задана}"
+        echo "сессия:    ${XDG_SESSION_TYPE:-неизвестно}"
+        echo "рабочий стол: ${XDG_CURRENT_DESKTOP:-неизвестно}"
+        echo
+        echo "внешние программы:"
+        local p
+        for p in gsettings dconf systemctl curl jq file python3 conky                  papirus-folders wal fc-list notify-send gnome-terminal; do
+            if have "$p"; then
+                echo "  есть      $p"
+            else
+                echo "  НЕТ       $p"
+            fi
+        done
         echo '```'
         echo
         echo '## Состояние системы'
@@ -4101,10 +4743,16 @@ PY
         echo '```'
         bash "$SELF" status 2>&1
         echo '```'
+        echo
+        echo '## Что менял скрипт (последние строки лога)'
+        echo
+        echo '```'
+        tail -40 "$LOG_FILE" 2>/dev/null
+        echo '```'
     } > "$report_dir/selftest.md"
 
     if [ -f "$LOG_FILE" ]; then
-        tail -200 "$LOG_FILE" > "$report_dir/desktop-kit.log"
+        tail -300 "$LOG_FILE" > "$report_dir/desktop-kit.log"
     fi
     for f in "$CSS3" "$CSS4"; do
         if [ -f "$f" ]; then
@@ -4113,6 +4761,12 @@ PY
     done
     if [ -f "$BEFORE" ]; then
         cp "$BEFORE" "$report_dir/before.env"
+    fi
+    if [ -f "$KIT_STATE" ]; then
+        cp "$KIT_STATE" "$report_dir/state.env"
+    fi
+    if [ -f "$CONKY_CONF" ]; then
+        cp "$CONKY_CONF" "$report_dir/conky-main.conf" 2>/dev/null
     fi
 
     local archive="$HOME/desktop-kit-selftest.tar.gz"
@@ -4130,117 +4784,766 @@ PY
     return 0
 }
 
+SELFTEST_ONLY=""
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert help"
+
 selftest_full() {
-    # ВАЖНО: применяем и откатываем в ОТДЕЛЬНОМ доме, а не на живой машине.
-    # Прошлая версия делала revert all и уносила настройки пользователя в
-    # состояние до первого запуска kit'а — это потеря его настроек.
-    local sandbox
-    sandbox=$(mktemp -d)
-    note "песочница: $sandbox (живые настройки не трогаются)"
+    note "песочница с подставными gsettings, dconf, curl и systemd"
+    note "живые настройки не трогаются вообще: скрипт видит только заглушки"
 
-    mkdir -p "$sandbox/.config/gtk-3.0" "$sandbox/.config/conky" \
-             "$sandbox/.local/share/icons/Adwaita" "$sandbox/.local/share/newtab" \
-             "$sandbox/Pictures/wallpapers-uw" "$sandbox/.themes"
-
-    # исходное содержимое, чтобы проверить сохранность чужих правил
-    printf '/* чужое правило */\nwindow { color: red; }\n' > "$sandbox/.config/gtk-3.0/gtk.css"
-    printf "conky.config = {\n    own_window_argb_value = 225,\n    own_window_colour = '1e1e2e',\n}\n" \
-        > "$sandbox/.config/conky/main.conf"
-    printf 'Тест|https://example.com\n' > "$sandbox/.local/share/newtab/links.txt"
-    for i in 1 2 3; do
-        echo x > "$sandbox/Pictures/wallpapers-uw/w$i.jpg"
-    done
-
-    local s3="$sandbox/.config/gtk-3.0/gtk.css"
-    local s4="$sandbox/.config/gtk-4.0/gtk.css"
-
-    HOME="$sandbox" bash "$SELF" buttons --size 40 30 --icon 18 >/dev/null 2>&1
-    if grep -q 'dk:buttons-begin' "$s3" 2>/dev/null; then
-        t_ok "buttons: правила записаны в gtk-3.0"
-    else
-        t_fail "buttons: правил в gtk-3.0 нет"
-    fi
-    if grep -q 'dk:buttons-begin' "$s4" 2>/dev/null; then
-        t_ok "buttons: правила записаны в gtk-4.0"
-    else
-        t_fail "buttons: правил в gtk-4.0 нет"
-    fi
-    if grep -q 'min-width: 40px' "$s4" 2>/dev/null; then
-        t_ok "buttons: размер применился"
-    else
-        t_fail "buttons: размер не применился"
-    fi
-    if grep -q '!important' "$s4" 2>/dev/null; then
-        t_fail "buttons: в правилах появился !important"
-    else
-        t_ok "buttons: !important не появился"
-    fi
-
-    HOME="$sandbox" bash "$SELF" corners --radius 8 >/dev/null 2>&1
-    if grep -q 'border-radius: 8px' "$s4" 2>/dev/null; then
-        t_ok "corners: радиус применился"
-    else
-        t_fail "corners: радиус не применился"
-    fi
-    if grep -q 'dk:buttons-begin' "$s4" 2>/dev/null; then
-        t_ok "corners: не затёр правила кнопок"
-    else
-        t_fail "corners: затёр правила кнопок"
-    fi
-
-    HOME="$sandbox" bash "$SELF" widget --radius 14 >/dev/null 2>&1
-    if grep -q 'local RADIUS = 14' "$sandbox/.config/conky/desktop-kit-bg.lua" 2>/dev/null; then
-        t_ok "widget: подложка нарисована"
-    else
-        t_fail "widget: подложка не создана"
-    fi
-
-    HOME="$sandbox" bash "$SELF" newtab >/dev/null 2>&1
-    if [ -f "$sandbox/.local/share/newtab/index.html" ]; then
-        t_ok "newtab: страница собрана"
-        # в JavaScript не должно быть ключевых слов оболочки
-        if grep -qE '^\s*local ' "$sandbox/.local/share/newtab/index.html"; then
-            t_fail "newtab: в JavaScript утекло 'local' — блок скрипта не выполнится"
-        else
-            t_ok "newtab: JavaScript чист"
+    local only="${SELFTEST_ONLY:-}"
+    local g
+    for g in $SELFTEST_GROUPS; do
+        if [ -n "$only" ]; then
+            case " $only " in
+                *" $g "*) : ;;
+                *) continue ;;
+            esac
         fi
-    else
-        t_fail "newtab: страница не собралась"
-    fi
-
-    HOME="$sandbox" bash "$SELF" wall >/dev/null 2>&1
-    if [ -s "$sandbox/.local/state/desktop-kit/current-wallpaper" ]; then
-        t_ok "wall: обои выбраны по списку"
-    else
-        t_fail "wall: обои не выбрались"
-    fi
-
-    HOME="$sandbox" bash "$SELF" revert all >/dev/null 2>&1
-    if grep -q 'dk:' "$s3" 2>/dev/null; then
-        t_fail "revert: правила остались"
-    else
-        t_ok "revert: правила убраны"
-    fi
-    if grep -q 'чужое правило' "$s3" 2>/dev/null; then
-        t_ok "revert: чужие правила уцелели"
-    else
-        t_fail "revert: чужие правила потеряны"
-    fi
-    if grep -q 'own_window_argb_value = 225' "$sandbox/.config/conky/main.conf" 2>/dev/null; then
-        t_ok "revert: конфиг conky восстановлен"
-    else
-        t_fail "revert: конфиг conky не вернулся"
-    fi
-    if [ -f "$sandbox/Pictures/wallpapers-uw/w1.jpg" ]; then
-        t_ok "revert: обои не удалены"
-    else
-        t_fail "revert: откат снёс картинки"
-    fi
-
-    rm -rf "$sandbox"
-    note "песочница убрана, живые настройки не менялись"
+        "st_$g"
+    done
 }
 
+# --------------------------------------------------------------- ядро
+
+st_core() {
+    t_group "ядро: флаги, состояние, откат файлов"
+    sandbox_new
+
+    local c3="$SB/.config/gtk-3.0/gtk.css"
+    local c4="$SB/.config/gtk-4.0/gtk.css"
+    local before_sum
+    before_sum=$(md5sum "$c3" | cut -d' ' -f1)
+
+    # --dry-run обязан быть read-only для КАЖДОЙ команды, а не только там,
+    # где об этом вспомнили
+    local cmd
+    for cmd in "buttons" "corners --radius 4" "theme Graphite-Light" \
+               "icons Papirus" "font Cantarell 12" "widget --radius 4" \
+               "newtab" "wall" "keys --defaults"; do
+        sandbox_run --dry-run $cmd
+    done
+    t_eq "--dry-run не тронул gtk-3.0/gtk.css" "$before_sum" "$(md5sum "$c3" | cut -d' ' -f1)"
+    t_nofile "--dry-run не создал gtk-4.0/gtk.css" "$c4"
+    t_eq "--dry-run не тронул тему окон" "Graphite-Dark" "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_eq "--dry-run не тронул тему значков" "Adwaita" "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_eq "--dry-run не тронул шрифт" "Cantarell 11" "$(sb_get org.gnome.desktop.interface font-name)"
+    t_nofile "--dry-run не создал снимок исходных значений"         "$SB/.local/state/desktop-kit/before.env"
+    t_nofile "--dry-run не создал резервных копий" "$SB/.local/state/desktop-kit/backups"
+    t_nofile "--dry-run не создал страницу новой вкладки" "$SB/.local/share/newtab/index.html"
+
+    # кривые аргументы должны отвергаться, а не проглатываться
+    sandbox_run buttons --size
+    t_rc_not "buttons --size без значений отвергнут"
+    sandbox_run buttons --size abc def
+    t_rc_not "buttons: нечисловой размер отвергнут"
+    sandbox_run corners --radius -5x
+    t_rc_not "corners: мусорный радиус отвергнут"
+    sandbox_run widget --radius abc
+    t_rc_not "widget: нечисловой радиус отвергнут"
+    sandbox_run panel --opacity 300
+    t_rc_not "panel: прозрачность больше 100 отвергнута"
+    sandbox_run terminal --opacity 200
+    t_rc_not "terminal: прозрачность больше 100 отвергнута"
+    sandbox_run nosuchcommand
+    t_rc_not "неизвестная команда отвергнута"
+    sandbox_run buttons --нетакогофлага
+    t_rc_not "неизвестный флаг отвергнут"
+
+    # значения со спецсимволами должны переживать запись и чтение состояния
+    sb_set org.gnome.desktop.interface font-name "Ubuntu Nerd Font Propo 11"
+    sandbox_run font "Cantarell 13"
+    sandbox_run revert font
+    t_eq "шрифт с пробелами вернулся дословно" \
+        "Ubuntu Nerd Font Propo 11" "$(sb_get org.gnome.desktop.interface font-name)"
+
+    # лог обязан вестись
+    t_file "лог пишется" "$SB/.local/state/desktop-kit/desktop-kit.log"
+    t_has "в логе видны запуски" "$SB/.local/state/desktop-kit/desktop-kit.log" "запуск:"
+
+    # --quiet глушит обычный вывод, но не ошибки
+    sandbox_run --quiet status
+    if [ -s "$SB_OUT" ]; then
+        t_fail "--quiet: status всё равно печатает"
+        t_detail "вывод: $(head -3 "$SB_OUT" | tr '\n' ' ')"
+    else
+        t_ok "--quiet: обычный вывод подавлен"
+    fi
+
+    sandbox_drop
+}
+
+# ------------------------------------------------------------ buttons
+
+st_buttons() {
+    t_group "buttons: кнопки заголовка"
+    sandbox_new
+
+    local c3="$SB/.config/gtk-3.0/gtk.css"
+    local c4="$SB/.config/gtk-4.0/gtk.css"
+
+    # --glyphs keep не должен ни ходить в сеть, ни трогать тему значков
+    sandbox_run buttons --glyphs keep
+    t_eq "с --glyphs keep тема значков не тронута" "Adwaita"         "$(sb_get org.gnome.desktop.interface icon-theme)"
+    if [ -f "$SB_STORE/curl.log" ]; then
+        t_fail "с --glyphs keep всё равно была попытка скачивания"
+    else
+        t_ok "с --glyphs keep обошлось без сети"
+    fi
+
+    sandbox_run buttons --size 40 30 --icon 18 --radius 0 --close "#ff0000"
+    t_rc "команда отработала" 0
+    t_has "блок для GTK3 записан" "$c3" "dk:buttons-begin"
+    t_has "блок для GTK4 записан" "$c4" "dk:buttons-begin"
+    t_has "ширина кнопки применилась" "$c4" "min-width: 40px"
+    t_has "высота кнопки применилась" "$c4" "min-height: 30px"
+    t_has "размер значка применился" "$c4" "-gtk-icon-size: 18px"
+    t_has "цвет закрытия применился" "$c4" "#ff0000"
+
+    # главные грабли проекта — они не должны вернуться
+    t_hasnt "нет !important (GTK выбрасывает такое правило целиком)" "$c4" "!important"
+    t_hasnt "нет !important в GTK3" "$c3" "!important"
+    t_has "круг гасится на image, а не на кнопке" "$c4" "windowcontrols > button > image"
+    t_hasnt "в GTK3 нет свойства -gtk-icon-size (его там не существует)" "$c3" "-gtk-icon-size:"
+
+    # чужие правила обязаны уцелеть
+    t_has "чужое правило в gtk.css уцелело" "$c3" "чужое правило"
+
+    # тема значков: наследник поверх текущей
+    t_eq "тема значков стала наследником" "Adwaita-dk-glyphs" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_file "каталог наследника создан" "$SB/.local/share/icons/Adwaita-dk-glyphs/index.theme"
+    t_has "наследник наследует базу" "$SB/.local/share/icons/Adwaita-dk-glyphs/index.theme" "Inherits=Adwaita"
+    t_file "значок закрытия на месте" \
+        "$SB/.local/share/icons/Adwaita-dk-glyphs/symbolic/actions/window-close-symbolic.svg"
+
+    # повторный запуск не должен плодить блоки
+    sandbox_run buttons --size 46 34
+    local n
+    n=$(grep -c 'dk:buttons-begin' "$c4")
+    t_eq "повторный запуск не удвоил блок" "1" "$n"
+    t_has "новый размер применился" "$c4" "min-width: 46px"
+    t_hasnt "старый размер убран" "$c4" "min-width: 40px"
+
+    # база наследника не должна накручиваться сама на себя
+    sandbox_run buttons
+    t_eq "наследник не наслоился сам на себя" "Adwaita-dk-glyphs" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_nofile "нет двойного наследника" "$SB/.local/share/icons/Adwaita-dk-glyphs-dk-glyphs"
+
+    # gtk-4.0/gtk.css как симлинк в тему — ссылку надо снять
+    sandbox_drop
+    sandbox_new
+    mkdir -p "$SB/.themes/Graphite-Dark/gtk-4.0" "$SB/.config/gtk-4.0"
+    printf '/* внутри темы */\n' > "$SB/.themes/Graphite-Dark/gtk-4.0/gtk.css"
+    ln -sf "$SB/.themes/Graphite-Dark/gtk-4.0/gtk.css" "$SB/.config/gtk-4.0/gtk.css"
+    sandbox_run buttons
+    if [ -L "$SB/.config/gtk-4.0/gtk.css" ]; then
+        t_fail "симлинк gtk-4.0 не снят — правки уедут внутрь темы"
+    else
+        t_ok "симлинк gtk-4.0 снят перед записью"
+    fi
+    t_hasnt "внутрь темы ничего не записано" "$SB/.themes/Graphite-Dark/gtk-4.0/gtk.css" "dk:buttons"
+
+    sandbox_drop
+}
+
+# ------------------------------------------------------------ corners
+
+st_corners() {
+    t_group "corners: скругление окон"
+    sandbox_new
+
+    local c4="$SB/.config/gtk-4.0/gtk.css"
+
+    sandbox_run buttons
+    sandbox_run corners --radius 8
+    t_has "радиус применился" "$c4" "border-radius: 8px"
+    t_has "блок кнопок уцелел" "$c4" "dk:buttons-begin"
+    t_has "блок углов записан" "$c4" "dk:corners-begin"
+
+    sandbox_run corners --square
+    t_has "острые углы: радиус 0" "$c4" "border-radius: 0px"
+    t_eq "блок углов остался один" "1" "$(grep -c 'dk:corners-begin' "$c4")"
+    t_has "блок кнопок пережил повтор" "$c4" "dk:buttons-begin"
+
+    # снятие одного блока не должно задевать другой
+    sandbox_run revert corners
+    t_hasnt "блок углов снят" "$c4" "dk:corners-begin"
+    t_has "блок кнопок на месте" "$c4" "dk:buttons-begin"
+
+    sandbox_drop
+}
+
+# -------------------------------------------------------------- theme
+
+st_theme() {
+    t_group "theme: тема окон и переключение варианта"
+    sandbox_new
+
+    # разбор имён — чистая логика, без запуска команд
+    local vcase nm rest want_v want_b got
+    local vbad=0
+    for vcase in "Graphite-Dark:dark:Graphite" "Graphite-Light:light:Graphite" \
+                 "Yaru-dark:dark:Yaru" "Graphite-teal-Dark:dark:Graphite-teal" \
+                 "WhiteSur-Darker:dark:WhiteSur" "Adwaita:unknown:Adwaita"; do
+        nm="${vcase%%:*}"
+        rest="${vcase#*:}"
+        want_v="${rest%%:*}"
+        want_b="${rest##*:}"
+        got=$(theme_variant_of "$nm")
+        if [ "$got" != "$want_v" ]; then
+            t_fail "разбор '$nm': вариант"
+            t_detail "ожидалось [$want_v], получено [$got]"
+            vbad=1
+        fi
+        got=$(theme_base_of "$nm")
+        if [ "$got" != "$want_b" ]; then
+            t_fail "разбор '$nm': база"
+            t_detail "ожидалось [$want_b], получено [$got]"
+            vbad=1
+        fi
+    done
+    if [ "$vbad" = "0" ]; then
+        t_ok "имена тем разбираются верно (6 форм)"
+    fi
+
+    # переключение на светлую без знания имени
+    sandbox_run theme --light
+    t_rc "переключение прошло" 0
+    t_eq "Graphite-Dark стала Graphite-Light" "Graphite-Light" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_eq "схема пошла следом" "prefer-light" \
+        "$(sb_get org.gnome.desktop.interface color-scheme)"
+    t_eq "тема значков не тронута" "Adwaita" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_out_has "сказано, что значки не менялись" "тема значков не менялась"
+    t_eq "тема оболочки поставлена" "Graphite-Light" \
+        "$(sb_dconf /org/gnome/shell/extensions/user-theme/name)"
+
+    # и обратно
+    sandbox_run theme --dark
+    t_eq "обратно в тёмную" "Graphite-Dark" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # светлый вариант без суффикса
+    sb_set org.gnome.desktop.interface gtk-theme "Yaru-dark"
+    sandbox_run theme --light
+    t_eq "Yaru-dark стала Yaru" "Yaru" "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # пары нет — не менять НИЧЕГО
+    sb_set org.gnome.desktop.interface gtk-theme "Loner-Dark"
+    sb_set org.gnome.desktop.interface color-scheme "prefer-dark"
+    sandbox_run theme --light
+    t_rc_not "без пары команда отказывает"
+    t_eq "тема не тронута" "Loner-Dark" "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_eq "схема не тронута — рассинхрона нет" "prefer-dark" \
+        "$(sb_get org.gnome.desktop.interface color-scheme)"
+    t_out_has "предложен --scheme-only" "scheme-only"
+    t_out_has "показан список светлых тем" "Graphite-Light"
+
+    # --scheme-only меняет только схему
+    sandbox_run theme --light --scheme-only
+    t_eq "схема сменилась" "prefer-light" "$(sb_get org.gnome.desktop.interface color-scheme)"
+    t_eq "тема осталась" "Loner-Dark" "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # имя темы — данные, а не регулярка
+    sandbox_run theme "Graphite.Light"
+    t_rc_not "имя с точкой не считается совпадением"
+    t_ne "в настройки не уехало несуществующее имя" "Graphite.Light"         "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # несуществующая тема
+    sandbox_run theme НетТакойТемы
+    t_rc_not "несуществующая тема отвергнута"
+    t_out_has "показан список доступных" "Graphite-Dark"
+
+    # регистр имени
+    sandbox_run theme graphite-light
+    t_eq "имя в другом регистре принято" "Graphite-Light" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    sandbox_drop
+}
+
+# -------------------------------------------------------------- icons
+
+st_icons() {
+    t_group "icons: тема значков"
+    sandbox_new
+
+    sandbox_run icons Papirus
+    t_eq "тема значков сменилась" "Papirus" "$(sb_get org.gnome.desktop.interface icon-theme)"
+
+    sandbox_run icons НетТакойТемы
+    t_rc_not "несуществующая тема значков отвергнута"
+    t_eq "при отказе тема не менялась" "Papirus" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+
+    # значки заголовка не должны осиротеть при смене базовой темы
+    sandbox_run buttons
+    t_eq "наследник поверх Papirus" "Papirus-dk-glyphs" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    sandbox_run icons Papirus-Dark
+    t_eq "наследник пересобран поверх новой темы" "Papirus-Dark-dk-glyphs" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_has "наследник наследует новую базу" \
+        "$SB/.local/share/icons/Papirus-Dark-dk-glyphs/index.theme" "Inherits=Papirus-Dark"
+    t_out_has "про пересборку сказано вслух" "пересобираю"
+
+    # цвет папок только для Papirus
+    sb_set org.gnome.desktop.interface icon-theme "Adwaita"
+    sandbox_run icons --folders blue
+    t_rc_not "перекраска не-Papirus отвергнута"
+    t_out_has "объяснено почему" "Papirus"
+
+    sandbox_drop
+}
+
+# --------------------------------------------------------------- font
+
+st_font() {
+    t_group "font: шрифты интерфейса"
+    sandbox_new
+
+    sandbox_run font "Cantarell 13"
+    t_eq "шрифт применился" "Cantarell 13" "$(sb_get org.gnome.desktop.interface font-name)"
+
+    sandbox_run font "НетТакогоШрифта 12"
+    t_rc_not "несуществующий шрифт отвергнут"
+    t_eq "при отказе шрифт не менялся" "Cantarell 13" \
+        "$(sb_get org.gnome.desktop.interface font-name)"
+
+    # подстрока имени не должна сходить за шрифт
+    sandbox_run font "Cantarel 12"
+    t_rc_not "обрезанное имя шрифта отвергнуто"
+    t_ne "обрезанное имя не применилось" "Cantarel 12"         "$(sb_get org.gnome.desktop.interface font-name)"
+
+    sandbox_run font --mono "JetBrainsMono Nerd Font 12"
+    t_eq "моноширинный применился" "JetBrainsMono Nerd Font 12" \
+        "$(sb_get org.gnome.desktop.interface monospace-font-name)"
+
+    # повторная смена не должна затирать запомненное исходное
+    sandbox_run font "Cantarell 14"
+    sandbox_run revert font
+    t_eq "откат вернул ПЕРВОЕ значение, а не предыдущее" "Cantarell 11" \
+        "$(sb_get org.gnome.desktop.interface font-name)"
+
+    sandbox_drop
+}
+
+# ------------------------------------------------------------- widget
+
+st_widget() {
+    t_group "widget: виджет conky"
+    sandbox_new
+
+    local conf="$SB/.config/conky/main.conf"
+    local lua="$SB/.config/conky/desktop-kit-bg.lua"
+
+    sandbox_run widget --radius 14
+    t_file "lua-файл подложки создан" "$lua"
+    t_has "радиус попал в lua" "$lua" "local RADIUS = 14"
+    t_has "конфиг подключил lua" "$conf" "lua_load"
+    t_has "конфиг вызывает отрисовку" "$conf" "lua_draw_hook_pre"
+    t_has "своё окно стало прозрачным" "$conf" "own_window_argb_value = 0"
+
+    # повторный запуск не должен плодить строки
+    sandbox_run widget --radius 10
+    t_eq "lua_load не задвоился" "1" "$(grep -c 'lua_load' "$conf")"
+    t_eq "хук отрисовки не задвоился" "1" "$(grep -c 'lua_draw_hook_pre' "$conf")"
+    t_has "новый радиус применился" "$lua" "local RADIUS = 10"
+
+    # плотность: должна помниться ПОСЛЕДНЯЯ заданная, а не первая
+    sandbox_run widget --opacity 200
+    sandbox_run widget --opacity 120
+    sandbox_run widget --radius 6
+    t_has "взята последняя плотность" "$lua" "0.471"
+
+    # контраст
+    sandbox_run widget --colour f2f2f2
+    t_out_has "предупреждение о белом на белом" "не виден"
+    sandbox_run widget --light
+    t_has "--light поставил тёмный текст" "$conf" "default_color = '1e1e2e'"
+    sandbox_run widget --dark
+    t_has "--dark вернул светлый текст" "$conf" "default_color = 'ffffff'"
+
+    # нет конфига — внятный отказ
+    rm -f "$conf"
+    sandbox_run widget
+    t_rc_not "без конфига conky команда отказывает"
+    t_out_has "путь к конфигу назван" "conky"
+
+    sandbox_drop
+}
+
+# ----------------------------------------------------------- terminal
+
+st_terminal() {
+    t_group "terminal: GNOME Terminal"
+    sandbox_new
+
+    local prof="org.gnome.Terminal.Legacy.Profile:/org/gnome/terminal/legacy/profiles:/:b1-профиль/"
+
+    sandbox_run terminal --opacity 15
+    t_eq "прозрачность применилась" "15" "$(sb_get "$prof" background-transparency-percent)"
+    t_eq "прозрачный фон включён" "true" "$(sb_get "$prof" use-transparent-background)"
+
+    sandbox_run terminal --font "JetBrainsMono Nerd Font 12"
+    t_eq "шрифт применился" "JetBrainsMono Nerd Font 12" "$(sb_get "$prof" font)"
+    t_eq "системный шрифт отключён" "false" "$(sb_get "$prof" use-system-font)"
+
+    sandbox_run terminal --palette wal
+    t_eq "своя палитра включена" "false" "$(sb_get "$prof" use-theme-colors)"
+    t_eq "фон из палитры" "#101014" "$(sb_get "$prof" background-color)"
+
+    # откат должен вернуть ВСЕ ключи, а не часть
+    sandbox_run revert terminal
+    t_eq "прозрачность вернулась" "0" "$(sb_get "$prof" background-transparency-percent)"
+    t_eq "системный шрифт вернулся" "true" "$(sb_get "$prof" use-system-font)"
+    t_eq "цвета темы вернулись" "true" "$(sb_get "$prof" use-theme-colors)"
+
+    sandbox_drop
+}
+
+# ------------------------------------------------------------- newtab
+
+st_newtab() {
+    t_group "newtab: страница новой вкладки"
+    sandbox_new
+
+    local page="$SB/.local/share/newtab/index.html"
+    local links="$SB/.local/share/newtab/links.txt"
+
+    if ! have python3; then
+        t_skip "newtab: нет python3 — значки из Chrome не проверить"
+    fi
+    sandbox_run newtab
+    t_file "страница собрана" "$page"
+    t_has "ярлык из списка попал на страницу" "$page" "Тест"
+    t_hasnt "в JavaScript не утекло слово local" "$page" "local idx"
+    t_has "страница закрыта тегом" "$page" "</html>"
+
+    # ярлыки со спецсимволами — самое хрупкое место генератора
+    sandbox_run newtab --add 'Кавычка"и&амперсанд|https://example.com/?a=1&b=2'
+    t_rc "ярлык со спецсимволами принят" 0
+    sandbox_run newtab
+    t_has "спецсимволы не сломали страницу" "$page" "</html>"
+    t_has "амперсанд в адресе экранирован" "$page" "a=1&amp;"
+
+    # удаление по имени с точкой не должно снести соседа
+    sandbox_run newtab --add 'A.B|https://ab.example'
+    sandbox_run newtab --add 'AXB|https://axb.example'
+    sandbox_run newtab --remove 'A.B'
+    t_hasnt "нужный ярлык удалён" "$links" "A.B|"
+    t_has "сосед по маске уцелел" "$links" "AXB|"
+
+    # дубль не добавляется
+    sandbox_run newtab --add 'AXB|https://other.example'
+    t_rc_not "дубль имени отвергнут"
+
+    # список
+    sandbox_run newtab --list
+    t_out_has "список показывает ярлык" "AXB"
+
+    sandbox_drop
+}
+
+# --------------------------------------------------------------- wall
+
+st_wall() {
+    t_group "wall: смена обоев по порядку"
+    sandbox_new
+
+    sandbox_run wall --set "$SB/Pictures/wallpapers/w1.jpg"
+    t_eq "обои поставлены" "file://$SB/Pictures/wallpapers/w1.jpg" \
+        "$(sb_get org.gnome.desktop.background picture-uri)"
+    t_eq "экран блокировки тоже" "file://$SB/Pictures/wallpapers/w1.jpg" \
+        "$(sb_get org.gnome.desktop.screensaver picture-uri)"
+
+    sandbox_run wall
+    t_eq "следующая по порядку" "file://$SB/Pictures/wallpapers/w2.jpg" \
+        "$(sb_get org.gnome.desktop.background picture-uri)"
+    sandbox_run wall
+    t_eq "и ещё одна" "file://$SB/Pictures/wallpapers/w3.jpg" \
+        "$(sb_get org.gnome.desktop.background picture-uri)"
+    sandbox_run wall --prev
+    t_eq "назад по порядку" "file://$SB/Pictures/wallpapers/w2.jpg" \
+        "$(sb_get org.gnome.desktop.background picture-uri)"
+
+    # конец списка заворачивается в начало
+    sandbox_run wall --set "$SB/Pictures/wallpapers/w5.jpg"
+    sandbox_run wall
+    t_eq "с последней перешли на первую" "file://$SB/Pictures/wallpapers/w1.jpg" \
+        "$(sb_get org.gnome.desktop.background picture-uri)"
+
+    sandbox_run wall --show
+    t_out_has "показан номер в списке" "w1.jpg"
+
+    sandbox_drop
+}
+
+# --------------------------------------------------------- wallpapers
+
+st_wallpapers() {
+    t_group "wallpapers: банк картинок"
+    sandbox_new
+
+    if ! have jq; then
+        t_skip "wallpapers: нет jq"
+        sandbox_drop
+        return 0
+    fi
+
+    sandbox_run wallpapers --count 3
+    t_out_has "докачка отчиталась" "банке"
+    t_file "картинка скачалась" "$SB/Pictures/wallpapers/wallhaven-t1.jpg"
+
+    # чистка не должна трогать чужие файлы
+    t_file "чужой файл в каталоге уцелел" "$SB/Pictures/wallpapers/sources.txt"
+
+    # расписание
+    sandbox_run wallpapers --timer Wed 13:00
+    t_file "юнит таймера создан" "$SB/.config/systemd/user/desktop-kit-wallpapers.timer"
+    t_file "юнит службы создан" "$SB/.config/systemd/user/desktop-kit-wallpapers.service"
+    t_has "день и время попали в юнит" \
+        "$SB/.config/systemd/user/desktop-kit-wallpapers.timer" "Wed 13:00"
+    t_has "пропуск догоняется" \
+        "$SB/.config/systemd/user/desktop-kit-wallpapers.timer" "Persistent=true"
+    t_file "скрипт скопирован в ~/bin" "$SB/bin/desktop-kit"
+
+    sandbox_run wallpapers --timer Funday 13:00
+    t_rc_not "несуществующий день отвергнут"
+
+    # чистка банка
+    sandbox_run wallpapers --prune 2
+    t_file "чужой файл пережил чистку" "$SB/Pictures/wallpapers/sources.txt"
+    local left
+    left=$(find "$SB/Pictures/wallpapers" -maxdepth 1 -type f -name '*.jpg' | wc -l)
+    t_eq "в банке осталось сколько просили" "2" "$left"
+
+    sandbox_drop
+}
+
+# --------------------------------------------------------------- keys
+
+st_keys() {
+    t_group "keys: горячие клавиши"
+    sandbox_new
+
+    # чужое сочетание, заведённое человеком до нас
+    sb_set org.gnome.settings-daemon.plugins.media-keys custom-keybindings "['/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/']"
+    sb_set "org.gnome.settings-daemon.plugins.media-keys.custom-keybinding:/org/gnome/settings-daemon/plugins/media-keys/custom-keybindings/custom0/" name "Чужое"
+
+    sandbox_run keys --add "Скриншот|flameshot gui|<Control>q"
+    t_rc "сочетание добавлено" 0
+    local list
+    list=$(sb_get org.gnome.settings-daemon.plugins.media-keys custom-keybindings)
+    case "$list" in
+        *custom0*) t_ok "чужое сочетание в списке уцелело" ;;
+        *) t_fail "чужое сочетание пропало из списка"; t_detail "список: $list" ;;
+    esac
+    case "$list" in
+        *custom1*) t_ok "своё сочетание добавлено рядом" ;;
+        *) t_fail "своё сочетание не добавилось"; t_detail "список: $list" ;;
+    esac
+
+    # повторный запуск не должен плодить копии
+    sandbox_run keys --add "Скриншот|flameshot gui|<Control>q"
+    list=$(sb_get org.gnome.settings-daemon.plugins.media-keys custom-keybindings)
+    local n
+    n=$(printf '%s' "$list" | grep -o 'custom-keybindings/custom' | wc -l)
+    t_eq "повтор не создал третьего пути" "2" "$n"
+
+    # снятие своего
+    sandbox_run keys --remove "Скриншот"
+    list=$(sb_get org.gnome.settings-daemon.plugins.media-keys custom-keybindings)
+    case "$list" in
+        *custom0*) t_ok "после удаления чужое на месте" ;;
+        *) t_fail "удаление своего снесло чужое"; t_detail "список: $list" ;;
+    esac
+
+    sandbox_run keys --remove "НетТакого"
+    t_rc_not "удаление несуществующего отвергнуто"
+
+    sandbox_drop
+}
+
+# -------------------------------------------------------------- panel
+
+st_panel() {
+    t_group "panel: панель задач"
+    sandbox_new
+
+    printf "/org/gnome/shell/extensions/dash-to-panel/panel-sizes '{\"0\":48}'\n" \
+        > "$SB_STORE/dconf"
+
+    sandbox_run panel --opacity 0
+    t_eq "своя прозрачность включена" "true" \
+        "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/trans-use-custom-opacity)"
+    t_eq "прозрачность выставлена" "0.00" \
+        "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/trans-panel-opacity)"
+
+    sandbox_run panel --size 40
+    t_has "высота панели поменялась" "$SB_STORE/dconf" "40"
+
+    sandbox_run panel --opacity 300
+    t_rc_not "прозрачность больше 100 отвергнута"
+
+    sandbox_run revert panel
+    t_eq "размеры панели вернулись" '{"0":48}' \
+        "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/panel-sizes)"
+
+    sandbox_drop
+}
+
+# ---------------------------------------------------------------- app
+
+st_app() {
+    t_group "app: своя тема для приложения"
+    sandbox_new
+
+    mkdir -p "$SB/usr-applications"
+    printf '[Desktop Entry]\nName=Почта\nExec=evolution %%U\nType=Application\nActions=compose\n\n[Desktop Action compose]\nExec=evolution mailto:\n' \
+        > "$SB/usr-applications/evolution.desktop"
+
+    # чужой ярлык нельзя сносить
+    sandbox_run app chuzhoe --reset
+    t_file "чужой ярлык не удалён" "$SB/.local/share/applications/chuzhoe.desktop"
+    t_rc_not "удаление чужого ярлыка отвергнуто"
+
+    sandbox_drop
+}
+
+# -------------------------------------------------------------- serve
+
+st_serve() {
+    t_group "serve: локальная апка по http"
+    sandbox_new
+
+    mkdir -p "$SB/apka"
+    printf '<html></html>' > "$SB/apka/index.html"
+
+    sandbox_run serve "$SB/apka" --port 8099
+    t_file "юнит службы создан" "$SB/.config/systemd/user/desktop-kit-serve-apka.service"
+    t_has "порт попал в юнит" "$SB/.config/systemd/user/desktop-kit-serve-apka.service" "8099"
+    t_has "слушает только петлевой адрес" \
+        "$SB/.config/systemd/user/desktop-kit-serve-apka.service" "127.0.0.1"
+
+    sandbox_run revert serve
+    t_nofile "юнит снят откатом" "$SB/.config/systemd/user/desktop-kit-serve-apka.service"
+
+    sandbox_drop
+}
+
+# ------------------------------------------------------------- revert
+
+st_revert() {
+    t_group "revert: обратимость"
+    sandbox_new
+
+    local c3="$SB/.config/gtk-3.0/gtk.css"
+    local conf="$SB/.config/conky/main.conf"
+
+    sandbox_run buttons
+    sandbox_run corners --radius 8
+    sandbox_run theme Graphite-Light
+    sandbox_run icons Papirus
+    sandbox_run font "Cantarell 13"
+    sandbox_run widget --radius 12
+    sandbox_run terminal --opacity 20
+
+    # правка, сделанная человеком ПОСЛЕ установки, обязана уцелеть
+    printf '/* правка после установки */\n' >> "$c3"
+
+    sandbox_run revert all
+    t_hasnt "наши блоки убраны" "$c3" "dk:buttons-begin"
+    t_has "чужое правило уцелело" "$c3" "чужое правило"
+    t_has "поздняя правка уцелела" "$c3" "правка после установки"
+    t_eq "тема окон вернулась" "Graphite-Dark" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_eq "тема значков вернулась" "Adwaita" \
+        "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_eq "шрифт вернулся" "Cantarell 11" \
+        "$(sb_get org.gnome.desktop.interface font-name)"
+    t_has "конфиг conky вернулся" "$conf" "own_window_argb_value = 225"
+    t_nofile "lua подложки удалён" "$SB/.config/conky/desktop-kit-bg.lua"
+    t_file "обои не тронуты откатом" "$SB/Pictures/wallpapers/w1.jpg"
+    t_nofile "снимок исходных значений убран" "$SB/.local/state/desktop-kit/before.env"
+
+    # когда поздних правок не было — файл восстанавливается целиком
+    sandbox_drop
+    sandbox_new
+    sandbox_run buttons
+    sandbox_run revert all
+    local c3b="$SB/.config/gtk-3.0/gtk.css"
+    t_eq "файл вернулся дословно" \
+        "$(printf '/* чужое правило */\nwindow { color: red; }')" \
+        "$(cat "$c3b")"
+
+    # неизвестная подсистема
+    sandbox_run revert нетакой
+    t_rc_not "неизвестная подсистема отвергнута"
+    t_out_has "перечислены доступные" "terminal"
+
+    sandbox_run revert --list
+    t_rc "revert --list работает" 0
+
+    sandbox_drop
+}
+
+# ------------------------------------------------- согласованность справки
+
+st_help() {
+    t_group "справка: покрытие всех команд"
+    sandbox_new
+
+    local all_cmds="buttons corners theme icons font widget terminal newtab"
+    all_cmds="$all_cmds wallpapers wall serve app keys panel audit status selftest revert"
+
+    local c
+    local missing=""
+    for c in $all_cmds; do
+        sandbox_run help "$c"
+        if [ ! -s "$SB_OUT" ]; then
+            missing="$missing $c"
+            continue
+        fi
+        if grep -q "нет справки" "$SB_OUT"; then
+            missing="$missing $c"
+        fi
+    done
+    if [ -z "$missing" ]; then
+        t_ok "у каждой команды есть справка ($(echo $all_cmds | wc -w) шт.)"
+    else
+        t_fail "команды без справки:$missing"
+    fi
+
+    sandbox_run help --settings
+    local k
+    local nosettings=""
+    for k in gtk-theme icon-theme color-scheme font-name picture-uri palette \
+             panel-sizes custom-keybindings gtk-3.0 conky newtab systemd; do
+        if ! grep -qF -- "$k" "$SB_OUT"; then
+            nosettings="$nosettings $k"
+        fi
+    done
+    if [ -z "$nosettings" ]; then
+        t_ok "help --settings перечисляет все группы настроек"
+    else
+        t_fail "в help --settings не хватает:$nosettings"
+    fi
+
+    sandbox_run help --all
+    local lines
+    lines=$(wc -l < "$SB_OUT")
+    if [ "$lines" -gt 200 ]; then
+        t_ok "help --all печатает всю справку ($lines строк)"
+    else
+        t_fail "help --all подозрительно короткий: $lines строк"
+    fi
+
+    sandbox_drop
+}
 # =====================================================================
 #  help и диспетчер
 # =====================================================================
@@ -4334,7 +5637,7 @@ help_settings() {
   app          ~/.local/share/applications/<app>.desktop
   (любая)      ~/bin/desktop-kit              копия себя для расписания
 
-СЛУЖБЫ SYSTEMD (пользовательские)
+СЛУЖБЫ SYSTEMD (пользовательские, каталог ~/.config/systemd/user)
   wallpapers   desktop-kit-wallpapers.service и .timer
   serve        desktop-kit-serve-<имя>.service   постоянный, с автозапуском
 
@@ -4471,7 +5774,7 @@ case "$COMMAND" in
     "")         usage ;;
     *)
         echo "неизвестная команда: $COMMAND"
-        echo
+        blank
         usage
         exit 1
         ;;
