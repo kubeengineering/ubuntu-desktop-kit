@@ -40,6 +40,23 @@ SELF=$(readlink -f "$0")
 
 # --------------------------------------------------------------- пути
 
+# Все пути строятся от $HOME. Если он пуст или равен корню, скрипт начнёт
+# писать конфиги и, что хуже, удалять их в /. Проверяем до первой операции.
+if [ -z "${HOME:-}" ]; then
+    echo "desktop-kit: переменная HOME пуста — отказываюсь работать" >&2
+    exit 1
+fi
+if [ "$HOME" = "/" ]; then
+    echo "desktop-kit: HOME=/ — так настраивают корень файловой системы," >&2
+    echo "а не рабочий стол. Запусти от обычного пользователя." >&2
+    exit 1
+fi
+if [ "$(id -u 2>/dev/null)" = "0" ]; then
+    echo "desktop-kit: запущен от root." >&2
+    echo "Настройки применятся руту, а не тебе. Запусти без sudo." >&2
+    exit 1
+fi
+
 STATE_DIR="$HOME/.local/state/desktop-kit"
 BACKUP_DIR="$STATE_DIR/backups"
 LOG_FILE="$STATE_DIR/desktop-kit.log"
@@ -53,6 +70,10 @@ CONKY_LUA="$CONKY_DIR/desktop-kit-bg.lua"
 NEWTAB_DIR="$HOME/.local/share/newtab"
 NEWTAB_LINKS="$NEWTAB_DIR/links.txt"
 BIN_DIR="$HOME/bin"
+# Маркер авторства для своих .desktop. Без него откат не отличал наш ярлык
+# от такого же по виду, но написанного человеком или прежним
+# evolution-light.sh, и сносил чужой файл вместе со своим.
+APP_MARK="# создано desktop-kit"
 # Системные каталоги вынесены в переменные ради самопроверки: иначе тест
 # в песочнице видел бы настоящие темы и ярлыки машины и был бы неповторим.
 SYS_THEMES="${DK_SYS_THEMES:-/usr/share/themes}"
@@ -1008,6 +1029,9 @@ THEME_LIGHT_SUFFIXES="-Lighter -lighter -Light -light -LIGHT -White -white"
 # нашлось только без учёта регистра, полезнее подсказать точное имя,
 # чем сказать «темы нет».
 theme_exists() {
+    if [ -z "$1" ]; then
+        return 1
+    fi
     # -F обязателен: имя темы это данные. Без него 'DKT.Dark' совпал бы
     # с 'DKTxDark', и в настройки уехала бы несуществующая тема.
     list_themes | grep -qxF -- "$1"
@@ -1049,6 +1073,13 @@ THEME_LIGHT_WORDS="lighter light white"
 # ВСЕГО внутри блока, и список слов "darker dark black" тогда становится
 # одним словом. На этом уже обожглись.
 theme_tokens() {
+    # awk на пустом вводе не печатает ничего, и дальше сравнение с числом
+    # валится с "integer expression expected". Пустое имя тут реально:
+    # gi_get вернёт пустоту, если GNOME не отвечает.
+    if [ -z "$1" ]; then
+        echo 0
+        return 0
+    fi
     printf '%s' "$1" | awk -F- '{print NF}'
 }
 
@@ -1058,8 +1089,14 @@ theme_token() {
 
 theme_variant_pos() {
     local name="$1"
+    if [ -z "$name" ]; then
+        return 1
+    fi
     local n
     n=$(theme_tokens "$name")
+    if [ -z "$n" ]; then
+        return 1
+    fi
     local i=1
     local low
     local w
@@ -1106,6 +1143,9 @@ theme_rebuild() {
     local word="${3:-}"
     local n
     n=$(theme_tokens "$name")
+    if [ -z "$n" ]; then
+        return 1
+    fi
     local i=1
     local out=""
     local tok
@@ -1160,6 +1200,9 @@ theme_swap_variant() {
 theme_find_variant() {
     local name="$1"
     local want="$2"
+    if [ -z "$name" ]; then
+        return 1
+    fi
     local words
     local w
     local cand
@@ -3137,10 +3180,18 @@ cmd_app() {
         fi
         # ярлык мог быть написан пользователем до нас — тогда это не наш мусор
         if [ -f "$dst" ]; then
-            if ! grep -q 'GTK_THEME=' "$dst"; then
-                bad "$dst не похож на созданный нами: в нём нет GTK_THEME"
-                note "убери вручную, если это действительно лишний файл"
-                return 1
+            if ! grep -qF -- "$APP_MARK" "$dst"; then
+                if ! grep -q 'GTK_THEME=' "$dst"; then
+                    bad "$dst не похож на ярлык с подменой темы"
+                    note "убери вручную, если это действительно лишний файл"
+                    return 1
+                fi
+                bad "$dst подменяет тему, но метки desktop-kit в нём нет"
+                note "похоже, его сделал ты сам или прежний evolution-light.sh"
+                if ! confirm "всё равно удалить?"; then
+                    note "оставляю как есть"
+                    return 1
+                fi
             fi
         fi
         rm -f "$dst"
@@ -3200,6 +3251,7 @@ cmd_app() {
         esac
         printf '%s\n' "$line" >> "$tmp"
     done < "$dst"
+    printf '%s\n' "$APP_MARK" >> "$tmp"
     mv "$tmp" "$dst"
 
     if have update-desktop-database; then
@@ -3537,6 +3589,14 @@ revert_app() {
     fi
     for f in "$dir"/*.desktop; do
         if [ ! -f "$f" ]; then
+            continue
+        fi
+        # Удаляем ТОЛЬКО помеченные нами. Ярлык с GTK_THEME= мог написать
+        # сам человек или прежний evolution-light.sh — это его файл.
+        if ! grep -qF -- "$APP_MARK" "$f"; then
+            if grep -q 'GTK_THEME=' "$f"; then
+                note "$(basename "$f") подменяет тему, но создан не нами — оставляю"
+            fi
             continue
         fi
         if grep -q 'GTK_THEME=' "$f"; then
@@ -4420,6 +4480,10 @@ exit 0'
     # чужой ярлык приложения — его трогать нельзя
     printf '[Desktop Entry]\nName=Чужое\nExec=chuzhoe %%U\nType=Application\n' \
         > "$SB/.local/share/applications/chuzhoe.desktop"
+    # Ярлык, который человек сделал сам (или прежний evolution-light.sh):
+    # подменяет тему, но нашей метки в нём нет — удалять его нельзя.
+    printf '[Desktop Entry]\nName=Своё\nExec=env GTK_THEME=Yaru mymail %%U\nType=Application\n' \
+        > "$SB/.local/share/applications/chuzhoe-theme.desktop"
 
     # исходные значения настроек
     sb_set org.gnome.desktop.interface gtk-theme "Graphite-Dark"
@@ -5102,6 +5166,20 @@ st_core() {
     t_eq "шрифт с пробелами вернулся дословно" \
         "Ubuntu Nerd Font Propo 11" "$(sb_get org.gnome.desktop.interface font-name)"
 
+    # Все пути строятся от HOME. Пустой или корневой HOME — прямой путь
+    # к записи и удалению файлов в /.
+    local guard_out
+    guard_out=$(env -i PATH="/usr/local/bin:/usr/bin:/bin" bash "$SELF" status 2>&1)
+    case "$guard_out" in
+        *"HOME пуста"*) t_ok "пустой HOME отвергается" ;;
+        *) t_fail "пустой HOME не отвергнут"; t_detail "вывод: $(printf '%s' "$guard_out" | head -2)" ;;
+    esac
+    guard_out=$(env -i HOME=/ PATH="/usr/local/bin:/usr/bin:/bin" bash "$SELF" status 2>&1)
+    case "$guard_out" in
+        *"HOME=/"*) t_ok "HOME=/ отвергается" ;;
+        *) t_fail "HOME=/ не отвергнут"; t_detail "вывод: $(printf '%s' "$guard_out" | head -2)" ;;
+    esac
+
     # лог обязан вестись
     t_file "лог пишется" "$SB/.local/state/desktop-kit/desktop-kit.log"
     t_has "в логе видны запуски" "$SB/.local/state/desktop-kit/desktop-kit.log" "запуск:"
@@ -5274,6 +5352,29 @@ st_theme() {
     done
     if [ "$vbad" = "0" ]; then
         t_ok "имена тем разбираются верно (8 форм)"
+    fi
+
+    # Краевые имена не должны валить разбор: пустое приходит, когда
+    # gsettings молчит, а одно слово-вариант — это тема с именем "Dark".
+    local edge_bad=0
+    local e
+    for e in "" "-" "Dark" "Тема-Тёмная" "a b-Dark"; do
+        if ! theme_variant_of "$e" >/dev/null 2>&1; then
+            t_fail "разбор имени '$e' завершился ошибкой"
+            edge_bad=1
+        fi
+        if ! theme_base_of "$e" >/dev/null 2>&1; then
+            t_fail "выделение базы из '$e' завершилось ошибкой"
+            edge_bad=1
+        fi
+    done
+    if [ "$edge_bad" = "0" ]; then
+        t_ok "краевые имена тем не валят разбор (5 случаев)"
+    fi
+    if theme_exists ""; then
+        t_fail "пустое имя считается существующей темой"
+    else
+        t_ok "пустое имя темой не считается"
     fi
 
     # Вариант в середине имени — это не выдумка: ровно так называются темы
@@ -5749,6 +5850,9 @@ st_revert() {
     t_hasnt "наши блоки убраны" "$c3" "dk:buttons-begin"
     t_has "чужое правило уцелело" "$c3" "чужое правило"
     t_has "поздняя правка уцелела" "$c3" "правка после установки"
+    # Ярлык с подменой темы, сделанный не нами, откат сносить не имеет права.
+    t_file "чужой ярлык с GTK_THEME уцелел" \
+        "$SB/.local/share/applications/chuzhoe-theme.desktop"
     t_eq "тема окон вернулась" "Graphite-Dark" \
         "$(sb_get org.gnome.desktop.interface gtk-theme)"
     t_eq "тема значков вернулась" "Adwaita" \
