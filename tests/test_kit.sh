@@ -50,6 +50,27 @@ for stub in gtk-update-icon-cache nautilus conky pkill pgrep systemctl \
     printf '#!/usr/bin/env bash\nexit 0\n' > "$T/bin/$stub"
 done
 printf '#!/usr/bin/env bash\necho "JetBrainsMono Nerd Font"\necho "Cantarell"\n' > "$T/bin/fc-list"
+# Сеть в тестах запрещена: реальный curl на холодном DNS однажды
+# упёрся в timeout 60 — «плавающий» провал, час разбирательств.
+cat > "$T/bin/curl" <<'CURLEOF'
+#!/usr/bin/env bash
+OUT=""; USE_O=0; FMT=""; URL=""
+while [ $# -gt 0 ]; do
+    case "$1" in
+        -o) OUT="$2"; shift 2 ;;
+        -O) USE_O=1; shift ;;
+        -w) FMT="$2"; shift 2 ;;
+        http://*|https://*) URL="$1"; shift ;;
+        *) shift ;;
+    esac
+done
+BODY='<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"></svg>'
+case "$URL" in *wallhaven*) BODY='{"data":[]}' ;; esac
+if [ "$USE_O" = "1" ]; then printf '%s' "$BODY" > "$(basename "$URL")"; fi
+if [ -n "$OUT" ]; then printf '%s' "$BODY" > "$OUT"; fi
+if [ -n "$FMT" ]; then printf '200'; fi
+exit 0
+CURLEOF
 chmod +x "$T/bin/"*
 export PATH="$T/bin:$PATH"
 
@@ -347,8 +368,17 @@ run selftest > "$T/o" 2>&1
 if grep -q 'проверок пройдено' "$T/o"; then say 0 "самопроверка отработала"; else say 1 "самопроверка молчит"; tail -5 "$T/o"; fi
 # Отчёт живёт ТОЛЬКО внутри архива: каталог рядом больше не остаётся.
 if [ -e "$HOME/desktop-kit-selftest" ]; then say 1 "остался лишний каталог"; else say 0 "лишнего каталога нет"; fi
-if [ -f "$HOME/desktop-kit-selftest.tar.gz" ]; then say 0 "архив собран"; else say 1 "нет архива"; fi
-if tar -xzOf "$HOME/desktop-kit-selftest.tar.gz" ./selftest.md 2>/dev/null | grep -q 'OK   '; then
+# С установленным zip архив будет .zip, без него .tar.gz — оба варианта наши
+ARC=""
+if [ -f "$HOME/desktop-kit-selftest.zip" ]; then ARC="$HOME/desktop-kit-selftest.zip"; fi
+if [ -f "$HOME/desktop-kit-selftest.tar.gz" ]; then ARC="$HOME/desktop-kit-selftest.tar.gz"; fi
+if [ -n "$ARC" ]; then say 0 "архив собран: $(basename "$ARC")"; else say 1 "нет архива"; fi
+case "$ARC" in
+    *.zip)    REPORT=$(unzip -p "$ARC" selftest.md 2>/dev/null) ;;
+    *.tar.gz) REPORT=$(tar -xzOf "$ARC" ./selftest.md 2>/dev/null) ;;
+    *)        REPORT="" ;;
+esac
+if printf '%s' "$REPORT" | grep -q 'OK   '; then
     say 0 "в отчёте внутри архива есть результаты"
 else
     say 1 "отчёт в архиве пуст или не найден"
