@@ -867,6 +867,25 @@ diagnose_buttons() {
     return 0
 }
 
+# Аргументы, которыми можно повторить текущее применение кнопок.
+# Собираются из переменных самой команды: полагаться на строку аргументов
+# запуска нельзя — при вызове из tune там лежит слово "buttons".
+buttons_args() {
+    local a="--size $btn_w $btn_h --icon $btn_icon"
+    a="$a --gtk3-scale $gtk3_scale --radius $radius --close $close_colour"
+    if [ "$glyphs" != "fluent" ]; then
+        a="$a --glyphs $glyphs"
+    fi
+    if [ "$minimal" = "1" ]; then
+        a="$a --hover none"
+    else
+        if [ -n "$hover_colour" ]; then
+            a="$a --hover $hover_colour"
+        fi
+    fi
+    printf '%s' "$a"
+}
+
 cmd_buttons() {
     local btn_w=46
     local btn_h=34
@@ -999,7 +1018,7 @@ windowcontrols > button > image {
 }
 EOF
 )"
-        state_set BTN_ARGS "$DK_CMD_ARGS"
+        state_set BTN_ARGS "$(buttons_args)"
         ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} — остальное оставлено теме"
         if [ "$glyphs_ok" = "0" ]; then
             note "значки Fluent не ставились"
@@ -1149,7 +1168,7 @@ EOF
     # Запоминаем, чем именно применяли: установщики тем любят перезаписать
     # ~/.config/gtk-4.0/gtk.css целиком, и тогда правила надо вернуть теми же
     # параметрами, а не по умолчанию.
-    state_set BTN_ARGS "$DK_CMD_ARGS"
+    state_set BTN_ARGS "$(buttons_args)"
     ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} (GTK4), масштаб ${gtk3_scale} (GTK3)"
     ok "подсветка: радиус ${radius}px, закрытие ${close_colour}"
     if [ "$glyphs_ok" = "0" ]; then
@@ -1678,6 +1697,15 @@ cmd_refresh() {
         return 0
     fi
 
+    # Пусто не потому, что кто-то снёс, а потому, что ещё не настраивали.
+    if [ -z "$btn_args" ]; then
+        if [ -z "$cor_args" ]; then
+            note "кнопки и углы ещё не настраивались — возвращать нечего"
+            note "настроить: $0 tune"
+            return 0
+        fi
+    fi
+
     note "часть правил пропала — скорее всего их снёс установщик темы"
     if [ -n "$btn_args" ]; then
         note "возвращаю кнопки: $btn_args"
@@ -1750,7 +1778,7 @@ tooltip,
 EOF
 )"
 
-    state_set CORNERS_ARGS "$DK_CMD_ARGS"
+    state_set CORNERS_ARGS "--radius $radius"
     ok "радиус окон, меню и подсказок: ${radius}px"
     restart_gtk_apps
 }
@@ -2017,10 +2045,12 @@ themes_check() {
     local risky=0
     local hits
     local label
+    local looked=0
     for f in "$dir/gtk-3.0/gtk.css" "$dir/gtk-4.0/gtk.css"; do
         if [ ! -f "$f" ]; then
             continue
         fi
+        looked=$((looked + 1))
         label=$(basename "$(dirname "$f")")
         # Ищем правила кнопок, где тема подставляет собственную картинку.
         hits=$(grep "titlebutton\|windowcontrols" "$f" 2>/dev/null \
@@ -2032,6 +2062,15 @@ themes_check() {
             ok "$label: кнопки отданы теме значков"
         fi
     done
+
+    # Ни одного gtk.css — проверять было нечего, и объявлять тему
+    # совместимой нельзя: это разные вещи.
+    if [ "$looked" = "0" ]; then
+        blank
+        bad "в теме нет ни gtk-3.0/gtk.css, ни gtk-4.0/gtk.css"
+        note "проверять нечего — возможно, каталог темы неполный"
+        return 1
+    fi
 
     if [ "$risky" = "1" ]; then
         blank
@@ -5837,6 +5876,18 @@ t_hasnt() {
     return 0
 }
 
+t_hasnt_out() {
+    local name="$1"
+    local needle="$2"
+    if grep -qF -- "$needle" "$SB_OUT"; then
+        t_fail "$name"
+        t_detail "в выводе есть лишнее: [$needle]"
+        return 1
+    fi
+    t_ok "$name"
+    return 0
+}
+
 t_out_has() {
     local name="$1"
     local needle="$2"
@@ -7249,6 +7300,12 @@ st_themes() {
     t_rc_not "тема со своими кнопками не проходит"
     t_out_has "предложен минимальный режим" "hover none"
 
+    # Нет ни одного gtk.css — проверять нечего, и это не «совместима»
+    mkdir -p "$SB/.themes/Пустая"
+    sandbox_run themes --check Пустая
+    t_rc_not "тема без gtk.css не объявляется совместимой"
+    t_out_has "объяснено, что проверять нечего" "проверять нечего"
+
     sandbox_run themes --check НетНаДиске
     t_rc_not "отсутствующая тема отвергается"
 
@@ -7260,6 +7317,12 @@ st_themes() {
 st_refresh() {
     t_group "refresh: возврат своих правил"
     sandbox_new
+
+    # Пустое состояние — это «ещё не настраивали», а не «правила снесли»
+    sandbox_run refresh
+    t_rc "на чистой системе возврат не ошибка" 0
+    t_out_has "сказано, что настраивать нечего" "ещё не настраивались"
+    t_hasnt_out "нет ложной тревоги про установщик" "снёс установщик темы"
 
     sandbox_run buttons --size 44 32 --icon 19 --glyphs keep
     sandbox_run corners --radius 6
@@ -7352,6 +7415,26 @@ n
 y
 ' tune buttons
     t_hasnt "в минимальном режиме фон не трогается"         "$SB/.config/gtk-4.0/gtk.css" "background-image: none"
+
+    # Мастер вызывает команды изнутри: раньше в память уезжали аргументы
+    # внешней команды, и в BTN_ARGS попадало слово "buttons".
+    tune_run '52
+36
+21
+1
+1
+n
+' tune buttons
+    t_has "запомнены аргументы кнопок, а не слово tune"         "$SB/.local/state/desktop-kit/state.env" "--size 52 36"
+    t_hasnt "слово buttons в память не попало"         "$SB/.local/state/desktop-kit/state.env" "BTN_ARGS='buttons'"
+
+    # и они должны быть применимы: refresh не имеет права падать
+    rm -f "$SB/.config/gtk-4.0/gtk.css"
+    printf '/* тема */
+' > "$SB/.config/gtk-4.0/gtk.css"
+    sandbox_run refresh
+    t_rc "возврат после мастера отработал" 0
+    t_has "размер из мастера вернулся" "$SB/.config/gtk-4.0/gtk.css" "min-width: 52px"
 
     sandbox_run tune нетакого
     t_rc_not "неизвестный раздел отвергается"
