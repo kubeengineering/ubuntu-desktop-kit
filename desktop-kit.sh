@@ -853,6 +853,7 @@ windowcontrols > button > image {
 }
 EOF
 )"
+        state_set BTN_ARGS "$DK_CMD_ARGS"
         ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} — остальное оставлено теме"
         if [ "$glyphs_ok" = "0" ]; then
             note "значки Fluent не ставились"
@@ -999,6 +1000,10 @@ windowcontrols > button.close:active > image {
 EOF
 )"
 
+    # Запоминаем, чем именно применяли: установщики тем любят перезаписать
+    # ~/.config/gtk-4.0/gtk.css целиком, и тогда правила надо вернуть теми же
+    # параметрами, а не по умолчанию.
+    state_set BTN_ARGS "$DK_CMD_ARGS"
     ok "кнопка ${btn_w}x${btn_h}, значок ${btn_icon} (GTK4), масштаб ${gtk3_scale} (GTK3)"
     ok "подсветка: радиус ${radius}px, закрытие ${close_colour}"
     if [ "$glyphs_ok" = "0" ]; then
@@ -1128,6 +1133,73 @@ corners — скругление углов окон, меню и подсказ
 EOF
 }
 
+help_refresh() {
+    cat <<'EOF'
+refresh — вернуть свои правила на место
+
+  desktop-kit refresh
+
+  Установщики тем нередко перезаписывают ~/.config/gtk-4.0/gtk.css целиком
+  или делают его симлинком внутрь темы. Наши блоки при этом пропадают:
+  в GTK4-приложениях возвращаются круглые подсветки кнопок и акцент темы,
+  а в GTK3 всё остаётся как было — отсюда ощущение, что «сломался только
+  файловый менеджер».
+
+  Команда проверяет оба gtk.css и заново применяет buttons и corners
+  ровно с теми параметрами, с какими они применялись в прошлый раз.
+EOF
+}
+
+cmd_refresh() {
+    head1 "проверка своих правил"
+
+    # Симлинк в тему — правки уехали бы внутрь каталога темы
+    local f
+    for f in "$CSS3" "$CSS4"; do
+        if [ -L "$f" ]; then
+            bad "$f — симлинк на $(readlink -f "$f")"
+            note "его сделал установщик темы; снимаю, чтобы правила остались у тебя"
+            rm -f "$f"
+        fi
+    done
+
+    local need=0
+    if ! css_has buttons "$CSS4"; then
+        need=1
+    fi
+    if ! css_has corners "$CSS4"; then
+        need=1
+    fi
+    if ! css_has buttons "$CSS3"; then
+        need=1
+    fi
+
+    local btn_args
+    local cor_args
+    btn_args=$(state_get BTN_ARGS)
+    cor_args=$(state_get CORNERS_ARGS)
+
+    if [ "$need" = "0" ]; then
+        ok "правила на месте, возвращать нечего"
+        return 0
+    fi
+
+    note "часть правил пропала — скорее всего их снёс установщик темы"
+    if [ -n "$btn_args" ]; then
+        note "возвращаю кнопки: $btn_args"
+        cmd_buttons $btn_args
+    else
+        note "кнопки раньше не настраивались, пропускаю"
+    fi
+    if [ -n "$cor_args" ]; then
+        note "возвращаю углы: $cor_args"
+        cmd_corners $cor_args
+    else
+        note "углы раньше не настраивались, пропускаю"
+    fi
+    return 0
+}
+
 cmd_corners() {
     radius=0
     while [ $# -gt 0 ]; do
@@ -1184,6 +1256,7 @@ tooltip,
 EOF
 )"
 
+    state_set CORNERS_ARGS "$DK_CMD_ARGS"
     ok "радиус окон, меню и подсказок: ${radius}px"
     restart_gtk_apps
 }
@@ -1396,6 +1469,30 @@ themes_install() {
     done
     blank
     ok "поставлено: $ok_n, не вышло: $bad_n"
+
+    # Установщики тем перезаписывают ~/.config/gtk-4.0/gtk.css, и наши
+    # правила исчезают вместе с ним. Проверяем сразу, а не когда человек
+    # заметит круглые кнопки в файловом менеджере.
+    local lost=0
+    if [ -L "$CSS4" ]; then
+        lost=1
+    fi
+    if [ -n "$(state_get BTN_ARGS)" ]; then
+        if ! css_has buttons "$CSS4"; then
+            lost=1
+        fi
+    fi
+    if [ "$lost" = "1" ]; then
+        blank
+        bad "установка темы затронула ~/.config/gtk-4.0/gtk.css"
+        note "наши правила оттуда пропали — в GTK4-приложениях вернётся вид темы"
+        if confirm "вернуть их на место?"; then
+            cmd_refresh
+        else
+            note "потом вручную: $0 refresh"
+        fi
+    fi
+
     note "все имена:  $0 theme --list"
     note "примерить:  $0 theme ИМЯ"
     if [ "$bad_n" -gt 0 ]; then
@@ -5725,7 +5822,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -6666,6 +6763,48 @@ st_themes() {
 
 # ------------------------------------------------- согласованность справки
 
+st_refresh() {
+    t_group "refresh: возврат своих правил"
+    sandbox_new
+
+    sandbox_run buttons --size 44 32 --icon 19 --glyphs keep
+    sandbox_run corners --radius 6
+    t_has "аргументы кнопок запомнены"         "$SB/.local/state/desktop-kit/state.env" "BTN_ARGS"
+    t_has "аргументы углов запомнены"         "$SB/.local/state/desktop-kit/state.env" "CORNERS_ARGS"
+
+    # Установщики тем перезаписывают этот файл целиком — воспроизводим
+    rm -f "$SB/.config/gtk-4.0/gtk.css"
+    printf '/* правила темы */
+window { background: blue; }
+'         > "$SB/.config/gtk-4.0/gtk.css"
+
+    sandbox_run refresh
+    t_rc "возврат отработал" 0
+    t_has "блок кнопок вернулся" "$SB/.config/gtk-4.0/gtk.css" "dk:buttons-begin"
+    t_has "с прежним размером" "$SB/.config/gtk-4.0/gtk.css" "min-width: 44px"
+    t_has "блок углов вернулся" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 6px"
+    t_has "правила темы не затёрты" "$SB/.config/gtk-4.0/gtk.css" "правила темы"
+
+    sandbox_run refresh
+    t_out_has "второй раз возвращать нечего" "возвращать нечего"
+
+    # Симлинк в тему снимается: иначе наши правки уехали бы внутрь темы
+    mkdir -p "$SB/.themes/Тема/gtk-4.0"
+    printf '/* внутри темы */
+' > "$SB/.themes/Тема/gtk-4.0/gtk.css"
+    rm -f "$SB/.config/gtk-4.0/gtk.css"
+    ln -sf "$SB/.themes/Тема/gtk-4.0/gtk.css" "$SB/.config/gtk-4.0/gtk.css"
+    sandbox_run refresh
+    if [ -L "$SB/.config/gtk-4.0/gtk.css" ]; then
+        t_fail "симлинк в тему остался"
+    else
+        t_ok "симлинк в тему снят"
+    fi
+    t_hasnt "внутрь темы ничего не записано"         "$SB/.themes/Тема/gtk-4.0/gtk.css" "dk:buttons"
+
+    sandbox_drop
+}
+
 st_help() {
     t_group "справка: покрытие всех команд"
     sandbox_new
@@ -6730,6 +6869,7 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
 ВНЕШНИЙ ВИД
   buttons      кнопки заголовка: размер, значки, подсветка
   corners      скругление углов окон
+  refresh      вернуть свои правила, если их снесла установка темы
   theme        тема оформления, цветовая схема
   themes       банк готовых тем: список и установка
   icons        тема значков, цвет папок
@@ -6870,6 +7010,7 @@ cmd_help() {
         wall)       help_wall ;;
         app)        help_app ;;
         themes)     help_themes ;;
+        refresh)    help_refresh ;;
         keys)       help_keys ;;
         panel)      help_panel ;;
         serve)      help_serve ;;
@@ -6922,6 +7063,8 @@ COMMAND="${1:-}"
 if [ $# -gt 0 ]; then
     shift
 fi
+# Аргументы команды — чтобы подсистемы могли запомнить, чем их применяли
+DK_CMD_ARGS="$*"
 
 log "запуск: $COMMAND $*"
 
@@ -6939,6 +7082,7 @@ case "$COMMAND" in
     app)        cmd_app "$@" ;;
     serve)      cmd_serve "$@" ;;
     themes)     cmd_themes "$@" ;;
+    refresh)    cmd_refresh "$@" ;;
     keys)       cmd_keys "$@" ;;
     panel)      cmd_panel "$@" ;;
     audit)      cmd_audit "$@" ;;
