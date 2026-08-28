@@ -114,6 +114,21 @@ case "${1:-}" in
         if [ -f "$KIT" ]; then
             grep -m1 '^VERSION=' "$KIT" | cut -d'"' -f2
             say "файл: $KIT"
+            # Показываем и давность проверки: иначе непонятно, почему
+            # версия та же, что вчера — то ли гит не менялся, то ли
+            # запускалка ещё не ходила туда.
+            if [ -f "$STAMP" ]; then
+                last=$(cat "$STAMP" 2>/dev/null)
+                case "$last" in
+                    ''|*[!0-9]*) : ;;
+                    *)
+                        mins=$(( ( $(date +%s) - last ) / 60 ))
+                        say "с гитом сверялись $mins мин назад ($0 --update — сейчас)"
+                        ;;
+                esac
+            else
+                say "с гитом ещё не сверялись, запусти: $0 --update"
+            fi
         else
             warn "скрипт ещё не скачан, запусти: design --update"
             exit 1
