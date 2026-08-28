@@ -1,6 +1,6 @@
 # Карта desktop-kit.sh
 
-Всего 7742 строк, 299 КБ, примерно 102 тыс. токенов целиком.
+Всего 7817 строк, 303 КБ, примерно 103 тыс. токенов целиком.
 
 **Не читай файл целиком.** Найди место здесь или через `grep -n`, потом
 `Read` с `offset`/`limit` на 40–80 строк и `Edit` по найденному фрагменту.
@@ -37,8 +37,8 @@
 | Откат: общая логика | `cmd_revert` — строка 4860 |
 | Откат конкретных ключей GNOME | `revert_gi_keys` — строка 4844 |
 | Что показывает status | `cmd_status` — строка 4563 |
-| Полный перечень изменяемого | `help_settings` — строка 7547 |
-| Общий текст справки | `usage` — строка 7501 |
+| Полный перечень изменяемого | `help_settings` — строка 7622 |
+| Общий текст справки | `usage` — строка 7576 |
 | Диспетчер команд (добавить новую) | ищи `случай) cmd_` в самом конце файла: `grep -n 'cmd_status "$@"' desktop-kit.sh` |
 | Правила предшественника look.sh | `strip_legacy_css` — строка 516 |
 | Резервные копии и откат файлов | `backup_once` 313, `restore_backup` 343 |
@@ -50,25 +50,25 @@
 
 | Команда | Реализация | Справка | Тесты |
 |---|---|---|---|
-| `buttons` | 889 | 714 | 6528 |
-| `corners` | 1725 | 1287 | 6673 |
-| `theme` | 2507 | 1790 | 6700 |
-| `themes` | 1912 | 1866 | 7275 |
-| `icons` | 2845 | 2810 | 6848 |
-| `font` | 2972 | 2959 | 6882 |
-| `widget` | 3067 | 3042 | 6914 |
-| `terminal` | 3284 | 3257 | 6959 |
-| `newtab` | 3454 | 3433 | 6988 |
-| `wallpapers` | 3852 | 3811 | 7065 |
-| `wall` | 4181 | 4156 | 7031 |
-| `serve` | 4450 | 4430 | 7197 |
-| `app` | 4303 | 4285 | 7179 |
-| `keys` | 5275 | 5087 | 7107 |
-| `panel` | 5333 | 5313 | 7151 |
+| `buttons` | 889 | 714 | 6549 |
+| `corners` | 1725 | 1287 | 6694 |
+| `theme` | 2507 | 1790 | 6721 |
+| `themes` | 1912 | 1866 | 7296 |
+| `icons` | 2845 | 2810 | 6869 |
+| `font` | 2972 | 2959 | 6903 |
+| `widget` | 3067 | 3042 | 6935 |
+| `terminal` | 3284 | 3257 | 6980 |
+| `newtab` | 3454 | 3433 | 7009 |
+| `wallpapers` | 3852 | 3811 | 7086 |
+| `wall` | 4181 | 4156 | 7052 |
+| `serve` | 4450 | 4430 | 7218 |
+| `app` | 4303 | 4285 | 7200 |
+| `keys` | 5275 | 5087 | 7128 |
+| `panel` | 5333 | 5313 | 7172 |
 | `audit` | 5409 | — | — |
 | `status` | 4563 | — | — |
-| `selftest` | 6005 | 5425 | — |
-| `revert` | 4860 | 4656 | 7218 |
+| `selftest` | 6007 | 5425 | — |
+| `revert` | 4860 | 4656 | 7239 |
 
 ## Секции файла
 
@@ -96,8 +96,8 @@
     5310  panel — Dash to Panel
     5406  audit — снимок системы
     5422  selftest — проверка на живой машине
-    5463  Каркас самопроверки: песочница с подставными внешними программами
-    7498  help и диспетчер
+    5465  Каркас самопроверки: песочница с подставными внешними программами
+    7573  help и диспетчер
 
 ## Пути и константы
 
@@ -196,9 +196,9 @@
 
 ## Самопроверка
 
-    группы:      core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune help
-    каркас:      sandbox_new 5489, sandbox_run 5739
-    утверждения: t_eq 5814, t_has 5841, t_out_has 5891, t_rc 5905
+    группы:      core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report help
+    каркас:      sandbox_new 5491, sandbox_run 5741
+    утверждения: t_eq 5816, t_has 5843, t_out_has 5893, t_rc 5907
     заглушки:    13 штук, ищи sb_write_stub
 
 Запуск одной группы: `bash desktop-kit.sh selftest --only theme`
@@ -347,52 +347,53 @@
       5333 cmd_panel
       5409 cmd_audit
       5425 help_selftest
-      5482 sb_write_stub
-      5489 sandbox_new
-      5712 sb_set
-      5723 sb_get
-      5731 sb_dconf
-      5739 sandbox_run
-      5765 sandbox_verify
-      5789 sandbox_run_no
-      5797 sandbox_drop
-      5814 t_eq
-      5828 t_ne
-      5841 t_has
-      5861 t_hasnt
-      5879 t_hasnt_out
-      5891 t_out_has
-      5905 t_rc
-      5919 t_rc_not
-      5945 t_file
-      5957 t_nofile
-      5976 t_group
-      5985 t_ok
-      5987 t_fail
-      5992 t_skip
-      5997 t_detail
-      6005 cmd_selftest
-      6372 selftest_full
-      6415 st_core
-      6528 st_buttons
-      6673 st_corners
-      6700 st_theme
-      6848 st_icons
-      6882 st_font
-      6914 st_widget
-      6959 st_terminal
-      6988 st_newtab
-      7031 st_wall
-      7065 st_wallpapers
-      7107 st_keys
-      7151 st_panel
-      7179 st_app
-      7197 st_serve
-      7218 st_revert
-      7275 st_themes
-      7317 st_refresh
-      7365 st_tune
-      7446 st_help
-      7501 usage
-      7547 help_settings
-      7620 cmd_help
+      5484 sb_write_stub
+      5491 sandbox_new
+      5714 sb_set
+      5725 sb_get
+      5733 sb_dconf
+      5741 sandbox_run
+      5767 sandbox_verify
+      5791 sandbox_run_no
+      5799 sandbox_drop
+      5816 t_eq
+      5830 t_ne
+      5843 t_has
+      5863 t_hasnt
+      5881 t_hasnt_out
+      5893 t_out_has
+      5907 t_rc
+      5921 t_rc_not
+      5947 t_file
+      5959 t_nofile
+      5978 t_group
+      5987 t_ok
+      5989 t_fail
+      5994 t_skip
+      5999 t_detail
+      6007 cmd_selftest
+      6393 selftest_full
+      6436 st_core
+      6549 st_buttons
+      6694 st_corners
+      6721 st_theme
+      6869 st_icons
+      6903 st_font
+      6935 st_widget
+      6980 st_terminal
+      7009 st_newtab
+      7052 st_wall
+      7086 st_wallpapers
+      7128 st_keys
+      7172 st_panel
+      7200 st_app
+      7218 st_serve
+      7239 st_revert
+      7296 st_themes
+      7338 st_refresh
+      7386 st_tune
+      7467 st_report
+      7521 st_help
+      7576 usage
+      7622 help_settings
+      7695 cmd_help

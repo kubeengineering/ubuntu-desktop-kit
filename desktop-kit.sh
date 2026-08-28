@@ -5450,9 +5450,11 @@ selftest — проверить себя прямо на этой машине
   Группы: core buttons corners theme icons font widget terminal newtab
   wall wallpapers keys panel app serve revert help
 
-  В конце рядом ложится ~/desktop-kit-selftest.tar.gz — отчёт с причиной
-  каждого провала (что ожидалось, что получено), список внешних программ,
-  снимок состояния, обе gtk.css и лог. Его можно переслать целиком.
+  В конце в домашнем каталоге появляется ОДИН файл: архив
+  desktop-kit-selftest.zip (или .tar.gz, если zip не установлен).
+  Внутри без лишних папок: отчёт с причиной каждого провала (что
+  ожидалось, что получено), список внешних программ, снимок состояния,
+  обе gtk.css и лог. Никаких каталогов рядом не остаётся.
 
   DK_KEEP_SANDBOX=1 оставляет каталоги песочниц после прогона, если надо
   посмотреть, что именно получилось.
@@ -6016,10 +6018,17 @@ cmd_selftest() {
     done
 
     local started=$(date '+%Y-%m-%d %H:%M:%S')
-    local report_dir="$HOME/desktop-kit-selftest"
-    rm -rf "$report_dir"
-    mkdir -p "$report_dir"
-    TEST_DETAIL_FILE="$report_dir/подробности-провалов.txt"
+    # Отчёт собирается во временном каталоге и уезжает в архив целиком.
+    # Раньше рядом с архивом оставалась ещё и папка в $HOME — лишний мусор,
+    # который человек потом убирал руками.
+    local report_dir
+    report_dir=$(mktemp -d)
+    if [ -z "$report_dir" ]; then
+        die "не удалось создать временный каталог для отчёта"
+    fi
+    # Имя латиницей: кириллицу в именах внутри архива Windows часто
+    # показывает кракозябрами. Содержимое при этом по-русски.
+    TEST_DETAIL_FILE="$report_dir/failures.txt"
     : > "$TEST_DETAIL_FILE"
 
     head1 "самопроверка (безопасная часть)"
@@ -6351,14 +6360,26 @@ PY
         cp "$CONKY_CONF" "$report_dir/conky-main.conf" 2>/dev/null
     fi
 
-    local archive="$HOME/desktop-kit-selftest.tar.gz"
-    rm -f "$archive"
-    tar -czf "$archive" -C "$HOME" "$(basename "$report_dir")" 2>/dev/null
+    # Пакуем СОДЕРЖИМОЕ, а не каталог: иначе внутри архива лишний уровень.
+    # zip предпочтительнее tar.gz — браузеры на пути к получателю разжимают
+    # gzip и превращают .tar.gz в .tar, из-за чего выглядит как «архив
+    # внутри архива».
+    local archive
+    if have zip; then
+        archive="$HOME/desktop-kit-selftest.zip"
+        rm -f "$archive"
+        ( cd "$report_dir"; zip -q -r "$archive" . )
+    else
+        archive="$HOME/desktop-kit-selftest.tar.gz"
+        rm -f "$archive"
+        tar -czf "$archive" -C "$report_dir" . 2>/dev/null
+    fi
+
+    rm -rf "$report_dir"
 
     ok "проверок пройдено: $TEST_PASS, провалено: $TEST_FAIL"
-    ok "отчёт:  $report_dir/selftest.md"
-    ok "архив:  $archive"
-    note "пришли архив — по нему видно всё состояние"
+    ok "архив: $archive"
+    note "пришли его целиком — внутри отчёт, логи, конфиги и снимок состояния"
 
     if [ "$TEST_FAIL" -gt 0 ]; then
         return 1
@@ -6367,7 +6388,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -7439,6 +7460,60 @@ n
     sandbox_run tune нетакого
     t_rc_not "неизвестный раздел отвергается"
     t_out_has "перечислены разделы" "corners"
+
+    sandbox_drop
+}
+
+st_report() {
+    t_group "отчёт: один файл, без лишних папок"
+    sandbox_new
+
+    sandbox_run selftest
+    # Рядом с архивом не должно оставаться распакованного каталога:
+    # человек его потом убирает руками.
+    t_nofile "каталог отчёта не остался" "$SB/desktop-kit-selftest"
+
+    local arc=""
+    if [ -f "$SB/desktop-kit-selftest.zip" ]; then
+        arc="$SB/desktop-kit-selftest.zip"
+    fi
+    if [ -f "$SB/desktop-kit-selftest.tar.gz" ]; then
+        arc="$SB/desktop-kit-selftest.tar.gz"
+    fi
+    if [ -z "$arc" ]; then
+        t_fail "архив с отчётом не создан"
+        sandbox_drop
+        return 0
+    fi
+    t_ok "архив создан: $(basename "$arc")"
+
+    # Внутри — файлы, а не папка с файлами и не вложенный архив
+    local inside
+    case "$arc" in
+        *.tar.gz) inside=$(tar -tzf "$arc" 2>/dev/null) ;;
+        *)        inside=$(unzip -Z1 "$arc" 2>/dev/null) ;;
+    esac
+    case "$inside" in
+        *selftest.md*) t_ok "отчёт внутри архива" ;;
+        *) t_fail "в архиве нет selftest.md"; t_detail "содержимое: $(printf '%s' "$inside" | tr '
+' ' ')" ;;
+    esac
+    case "$inside" in
+        *desktop-kit-selftest/*)
+            t_fail "внутри архива лишняя папка"
+            t_detail "содержимое: $(printf '%s' "$inside" | tr '
+' ' ')"
+            ;;
+        *) t_ok "лишней папки внутри нет" ;;
+    esac
+    case "$inside" in
+        *.tar*|*.zip*|*.gz*)
+            t_fail "внутри архива лежит ещё один архив"
+            t_detail "содержимое: $(printf '%s' "$inside" | tr '
+' ' ')"
+            ;;
+        *) t_ok "вложенных архивов нет" ;;
+    esac
 
     sandbox_drop
 }
