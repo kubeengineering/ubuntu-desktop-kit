@@ -100,6 +100,43 @@ echo "| Запомнить значение для отката | \`remember\` $
 echo "| Наши текущие настройки | \`state_set\` $(line_of state_set) / \`state_get\` $(line_of state_get) |"
 echo
 
+# --------------------------------------------------- правишь -> гоняй
+echo "## Правишь -> гоняй (вместо полного прогона)"
+echo
+echo "Полный selftest --full нужен только перед выкладкой. После точечной"
+echo "правки достаточно её группы плюс зависимых:"
+echo
+echo '```'
+echo "bash tools/check.sh \"ГРУППА [ГРУППА]\""
+echo '```'
+echo
+echo "| Правишь | Гоняй группы | Почему ещё и вторые |"
+echo "|---|---|---|"
+echo "| cmd_buttons, install_fluent_glyphs, CSS кнопок | buttons refresh presets | refresh переприменяет кнопки, presets их разворачивает |"
+echo "| cmd_corners, CSS углов | corners presets overview | overview показывает наборы углов |"
+echo "| theme_* (разбор имён, варианты) | theme | — |"
+echo "| cmd_theme | theme revert | revert theme читает те же ключи |"
+echo "| theme_repo_for, themes_bank, cmd_themes | themes | — |"
+echo "| cmd_icons | icons buttons | buttons строит наследника поверх темы значков |"
+echo "| cmd_font, apply_font | font | — |"
+echo "| cmd_widget, widget_modules | widget tune | tune widget зовёт cmd_widget |"
+echo "| cmd_terminal, apply_wal_palette | terminal revert | откат терминала читает те же ключи |"
+echo "| cmd_newtab, генерация страницы | newtab wall | wall пересобирает страницу |"
+echo "| cmd_wall | wall | — |"
+echo "| cmd_wallpapers, prune | wallpapers | — |"
+echo "| cmd_keys / cmd_panel / cmd_app / cmd_serve | keys / panel / app / serve | — |"
+echo "| cmd_revert, restore_backup, revert_* | revert refresh | refresh тоже читает состояние |"
+echo "| remember/recall, state_*, backup_once, css_* | core revert | это фундамент отката |"
+echo "| preset_* | presets overview | обзор печатает наборы |"
+echo "| ask_*, tune_* | tune | — |"
+echo "| cmd_refresh | refresh | — |"
+echo "| отчёт selftest, упаковка архива | report | — |"
+echo "| usage, help_* | help | — |"
+echo
+echo "Правило: правка в ДВУХ местах из таблицы — гоняй обе строки."
+echo "Перед git push: полный прогон плюс tests/test_kit.sh и tests/test_variants.sh."
+echo
+
 # ---------------------------------------------------------------- команды
 echo "## Команды"
 echo

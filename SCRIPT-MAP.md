@@ -1,6 +1,6 @@
 # Карта desktop-kit.sh
 
-Всего 8160 строк, 315 КБ, примерно 107 тыс. токенов целиком.
+Всего 8269 строк, 320 КБ, примерно 109 тыс. токенов целиком.
 
 **Не читай файл целиком.** Найди место здесь или через `grep -n`, потом
 `Read` с `offset`/`limit` на 40–80 строк и `Edit` по найденному фрагменту.
@@ -11,64 +11,99 @@
 
 | Задача | Куда смотреть |
 |---|---|
-| Размер, цвет, подсветка кнопок заголовка | `cmd_buttons` — строка 1101, разбор ключей в начале, CSS ниже |
-| Значки заголовка: откуда берутся | `install_fluent_glyphs` — строка 1417, адрес в $FLUENT_ICONS |
-| Почему значков не видно | `diagnose_buttons` — строка 970 |
-| Скругление окон и меню | `cmd_corners` — строка 1952 |
-| Тема окон, схема, переключение светлая/тёмная | `cmd_theme` — строка 2744 |
-| Разбор имени темы на варианты | `theme_variant_of` — строка 2437, рядом theme_base_of, theme_swap_variant |
-| Поиск парного варианта темы | `theme_find_variant` — строка 2519 |
-| Добавить тему в банк | `theme_repo_for` — строка 2072, плюс themes_bank ниже |
-| Список и установка тем банка | `cmd_themes` — строка 2149 |
-| Проверка темы на совместимость с кнопками | `themes_check` — строка 2264 |
-| Тема значков и цвет папок | `cmd_icons` — строка 3082 |
-| Шрифты интерфейса | `cmd_font` — строка 3209 |
-| Виджет conky: подложка, цвет, плотность | `cmd_widget` — строка 3304 |
-| Прозрачность и палитра терминала | `cmd_terminal` — строка 3530 |
-| Страница новой вкладки Chrome | `cmd_newtab` — строка 3709, разметка в heredoc ниже по функции |
-| Плитки без python3 | `newtab_tiles_plain` — строка 3666 |
-| Смена обоев по порядку | `cmd_wall` — строка 4441 |
-| Докачка обоев и расписание | `cmd_wallpapers` — строка 4112 |
-| Чистка банка обоев | `prune_wallpapers` — строка 4372 |
-| Горячие клавиши | `cmd_keys` — строка 5535 |
-| Панель Dash to Panel | `cmd_panel` — строка 5593 |
-| Своя тема для приложения | `cmd_app` — строка 4563 |
-| Локальная апка по http | `cmd_serve` — строка 4710 |
-| Откат: общая логика | `cmd_revert` — строка 5120 |
-| Откат конкретных ключей GNOME | `revert_gi_keys` — строка 5104 |
-| Что показывает status | `cmd_status` — строка 4823 |
-| Полный перечень изменяемого | `help_settings` — строка 7965 |
-| Общий текст справки | `usage` — строка 7910 |
+| Размер, цвет, подсветка кнопок заголовка | `cmd_buttons` — строка 1102, разбор ключей в начале, CSS ниже |
+| Значки заголовка: откуда берутся | `install_fluent_glyphs` — строка 1418, адрес в $FLUENT_ICONS |
+| Почему значков не видно | `diagnose_buttons` — строка 971 |
+| Скругление окон и меню | `cmd_corners` — строка 1953 |
+| Тема окон, схема, переключение светлая/тёмная | `cmd_theme` — строка 2745 |
+| Разбор имени темы на варианты | `theme_variant_of` — строка 2438, рядом theme_base_of, theme_swap_variant |
+| Поиск парного варианта темы | `theme_find_variant` — строка 2520 |
+| Добавить тему в банк | `theme_repo_for` — строка 2073, плюс themes_bank ниже |
+| Список и установка тем банка | `cmd_themes` — строка 2150 |
+| Проверка темы на совместимость с кнопками | `themes_check` — строка 2265 |
+| Тема значков и цвет папок | `cmd_icons` — строка 3083 |
+| Шрифты интерфейса | `cmd_font` — строка 3210 |
+| Виджет conky: подложка, цвет, плотность | `cmd_widget` — строка 3365 |
+| Прозрачность и палитра терминала | `cmd_terminal` — строка 3602 |
+| Страница новой вкладки Chrome | `cmd_newtab` — строка 3804, разметка в heredoc ниже по функции |
+| Плитки без python3 | `newtab_tiles_plain` — строка 3738 |
+| Смена обоев по порядку | `cmd_wall` — строка 4543 |
+| Докачка обоев и расписание | `cmd_wallpapers` — строка 4214 |
+| Чистка банка обоев | `prune_wallpapers` — строка 4474 |
+| Горячие клавиши | `cmd_keys` — строка 5637 |
+| Панель Dash to Panel | `cmd_panel` — строка 5695 |
+| Своя тема для приложения | `cmd_app` — строка 4665 |
+| Локальная апка по http | `cmd_serve` — строка 4812 |
+| Откат: общая логика | `cmd_revert` — строка 5222 |
+| Откат конкретных ключей GNOME | `revert_gi_keys` — строка 5206 |
+| Что показывает status | `cmd_status` — строка 4925 |
+| Полный перечень изменяемого | `help_settings` — строка 8074 |
+| Общий текст справки | `usage` — строка 8019 |
 | Диспетчер команд (добавить новую) | ищи `случай) cmd_` в самом конце файла: `grep -n 'cmd_status "$@"' desktop-kit.sh` |
-| Правила предшественника look.sh | `strip_legacy_css` — строка 720 |
-| Резервные копии и откат файлов | `backup_once` 517, `restore_backup` 547 |
-| Блоки правил в gtk.css | `css_append` 784, `css_strip` 686 |
-| Запомнить значение для отката | `remember` 652 / `recall` 668 |
-| Наши текущие настройки | `state_set` 622 / `state_get` 637 |
+| Правила предшественника look.sh | `strip_legacy_css` — строка 721 |
+| Резервные копии и откат файлов | `backup_once` 518, `restore_backup` 548 |
+| Блоки правил в gtk.css | `css_append` 785, `css_strip` 687 |
+| Запомнить значение для отката | `remember` 653 / `recall` 669 |
+| Наши текущие настройки | `state_set` 623 / `state_get` 638 |
+
+## Правишь -> гоняй (вместо полного прогона)
+
+Полный selftest --full нужен только перед выкладкой. После точечной
+правки достаточно её группы плюс зависимых:
+
+```
+bash tools/check.sh "ГРУППА [ГРУППА]"
+```
+
+| Правишь | Гоняй группы | Почему ещё и вторые |
+|---|---|---|
+| cmd_buttons, install_fluent_glyphs, CSS кнопок | buttons refresh presets | refresh переприменяет кнопки, presets их разворачивает |
+| cmd_corners, CSS углов | corners presets overview | overview показывает наборы углов |
+| theme_* (разбор имён, варианты) | theme | — |
+| cmd_theme | theme revert | revert theme читает те же ключи |
+| theme_repo_for, themes_bank, cmd_themes | themes | — |
+| cmd_icons | icons buttons | buttons строит наследника поверх темы значков |
+| cmd_font, apply_font | font | — |
+| cmd_widget, widget_modules | widget tune | tune widget зовёт cmd_widget |
+| cmd_terminal, apply_wal_palette | terminal revert | откат терминала читает те же ключи |
+| cmd_newtab, генерация страницы | newtab wall | wall пересобирает страницу |
+| cmd_wall | wall | — |
+| cmd_wallpapers, prune | wallpapers | — |
+| cmd_keys / cmd_panel / cmd_app / cmd_serve | keys / panel / app / serve | — |
+| cmd_revert, restore_backup, revert_* | revert refresh | refresh тоже читает состояние |
+| remember/recall, state_*, backup_once, css_* | core revert | это фундамент отката |
+| preset_* | presets overview | обзор печатает наборы |
+| ask_*, tune_* | tune | — |
+| cmd_refresh | refresh | — |
+| отчёт selftest, упаковка архива | report | — |
+| usage, help_* | help | — |
+
+Правило: правка в ДВУХ местах из таблицы — гоняй обе строки.
+Перед git push: полный прогон плюс tests/test_kit.sh и tests/test_variants.sh.
 
 ## Команды
 
 | Команда | Реализация | Справка | Тесты |
 |---|---|---|---|
-| `buttons` | 1101 | 918 | 6809 |
-| `corners` | 1952 | 1509 | 6954 |
-| `theme` | 2744 | 2027 | 6981 |
-| `themes` | 2149 | 2103 | 7556 |
-| `icons` | 3082 | 3047 | 7129 |
-| `font` | 3209 | 3196 | 7163 |
-| `widget` | 3304 | 3279 | 7195 |
-| `terminal` | 3530 | 3503 | 7240 |
-| `newtab` | 3709 | 3688 | 7269 |
-| `wallpapers` | 4112 | 4071 | 7346 |
-| `wall` | 4441 | 4416 | 7312 |
-| `serve` | 4710 | 4690 | 7478 |
-| `app` | 4563 | 4545 | 7460 |
-| `keys` | 5535 | 5347 | 7388 |
-| `panel` | 5593 | 5573 | 7432 |
-| `audit` | 5669 | — | — |
-| `status` | 4823 | — | — |
-| `selftest` | 6267 | 5685 | — |
-| `revert` | 5120 | 4916 | 7499 |
+| `buttons` | 1102 | 919 | 6911 |
+| `corners` | 1953 | 1510 | 7056 |
+| `theme` | 2745 | 2028 | 7083 |
+| `themes` | 2150 | 2104 | 7665 |
+| `icons` | 3083 | 3048 | 7231 |
+| `font` | 3210 | 3197 | 7265 |
+| `widget` | 3365 | 3280 | 7297 |
+| `terminal` | 3602 | 3575 | 7342 |
+| `newtab` | 3804 | 3760 | 7371 |
+| `wallpapers` | 4214 | 4173 | 7455 |
+| `wall` | 4543 | 4518 | 7421 |
+| `serve` | 4812 | 4792 | 7587 |
+| `app` | 4665 | 4647 | 7569 |
+| `keys` | 5637 | 5449 | 7497 |
+| `panel` | 5695 | 5675 | 7541 |
+| `audit` | 5771 | — | — |
+| `status` | 4925 | — | — |
+| `selftest` | 6369 | 5787 | — |
+| `revert` | 5222 | 5018 | 7608 |
 
 ## Секции файла
 
@@ -77,29 +112,29 @@
     6  самопроверка прямо на рабочей машине.
     15  ЧТО ЗДЕСЬ УЧТЕНО (каждый пункт стоил отдельного круга отладки)
     144  Обзор команды: что сейчас, что можно
-    265  Пресеты: именованные наборы параметров
-    348  Вопросы пользователю
-    915  buttons — кнопки заголовка окна
-    1506  corners — скругление окон
-    1529  tune — настройка вопросами
-    2024  theme — тема GTK
-    2093  themes — банк готовых тем
-    3044  icons — тема значков и цвет папок
-    3193  font — шрифт интерфейса
-    3276  widget — виджет conky
-    3500  terminal — GNOME Terminal
-    3661  newtab — страница новой вкладки Chrome
-    4023  wallpapers / wall — банк обоев и смена
-    4542  app — тема отдельного приложения
-    4687  serve — локальная апка по http
-    4820  status — что применено
-    4913  revert — откат
-    5344  keys — горячие клавиши
-    5570  panel — Dash to Panel
-    5666  audit — снимок системы
-    5682  selftest — проверка на живой машине
-    5725  Каркас самопроверки: песочница с подставными внешними программами
-    7907  help и диспетчер
+    266  Пресеты: именованные наборы параметров
+    349  Вопросы пользователю
+    916  buttons — кнопки заголовка окна
+    1507  corners — скругление окон
+    1530  tune — настройка вопросами
+    2025  theme — тема GTK
+    2094  themes — банк готовых тем
+    3045  icons — тема значков и цвет папок
+    3194  font — шрифт интерфейса
+    3277  widget — виджет conky
+    3572  terminal — GNOME Terminal
+    3733  newtab — страница новой вкладки Chrome
+    4125  wallpapers / wall — банк обоев и смена
+    4644  app — тема отдельного приложения
+    4789  serve — локальная апка по http
+    4922  status — что применено
+    5015  revert — откат
+    5446  keys — горячие клавиши
+    5672  panel — Dash to Panel
+    5768  audit — снимок системы
+    5784  selftest — проверка на живой машине
+    5827  Каркас самопроверки: песочница с подставными внешними программами
+    8016  help и диспетчер
 
 ## Пути и константы
 
@@ -124,40 +159,40 @@
     88  DRY_RUN=0
     89  ASSUME_YES=0
     90  QUIET=0
-    344  PRESET_ARGS=""
-    345  PRESET_USED=""
-    356  ASK_ANSWER=""
-    620  KIT_STATE="$STATE_DIR/state.env"
-    705  LEGACY_CSS_MARK="look-begin"
-    706  LEGACY_ICON_SUFFIX="-Fluent-Titlebar"
-    2337  THEME_INSTALLED=""
-    2339  THEME_VARIANT_PICKED=""
-    2344  THEME_DARK_SUFFIXES="-Darker -darker -Dark -dark -DARK -Black -black"
+    345  PRESET_ARGS=""
+    346  PRESET_USED=""
+    357  ASK_ANSWER=""
+    621  KIT_STATE="$STATE_DIR/state.env"
+    706  LEGACY_CSS_MARK="look-begin"
+    707  LEGACY_ICON_SUFFIX="-Fluent-Titlebar"
+    2338  THEME_INSTALLED=""
+    2340  THEME_VARIANT_PICKED=""
+    2345  THEME_DARK_SUFFIXES="-Darker -darker -Dark -dark -DARK -Black -black"
 
 ## Где генерируется CSS
 
-    1214  css_append buttons "$CSS3" "$(cat <<EOF
-    1230  css_append buttons "$CSS4" "$(cat <<EOF
-    1252  css_append buttons "$CSS3" "$(cat <<EOF
-    1320  css_append buttons "$CSS4" "$(cat <<EOF
-    1985  css_append corners "$CSS3" "$(cat <<EOF
-    2003  css_append corners "$CSS4" "$(cat <<EOF
+    1215  css_append buttons "$CSS3" "$(cat <<EOF
+    1231  css_append buttons "$CSS4" "$(cat <<EOF
+    1253  css_append buttons "$CSS3" "$(cat <<EOF
+    1321  css_append buttons "$CSS4" "$(cat <<EOF
+    1986  css_append corners "$CSS3" "$(cat <<EOF
+    2004  css_append corners "$CSS4" "$(cat <<EOF
 
 Селекторы, которые чаще всего правятся:
-    1216  headerbar button.titlebutton,
-    1218  button.titlebutton {
-    1223  headerbar button.titlebutton image,
-    1225  button.titlebutton image {
-    1232  windowcontrols > button,
-    1238  windowcontrols > button > image {
-    1255  headerbar button.titlebutton,
-    1257  button.titlebutton {
-    1265  headerbar button.titlebutton image,
-    1267  button.titlebutton image {
-    1276  headerbar button.titlebutton:hover,
-    1278  button.titlebutton:hover {
-    1284  headerbar button.titlebutton:hover image,
-    1285  button.titlebutton:hover image {
+    1217  headerbar button.titlebutton,
+    1219  button.titlebutton {
+    1224  headerbar button.titlebutton image,
+    1226  button.titlebutton image {
+    1233  windowcontrols > button,
+    1239  windowcontrols > button > image {
+    1256  headerbar button.titlebutton,
+    1258  button.titlebutton {
+    1266  headerbar button.titlebutton image,
+    1268  button.titlebutton image {
+    1277  headerbar button.titlebutton:hover,
+    1279  button.titlebutton:hover {
+    1285  headerbar button.titlebutton:hover image,
+    1286  button.titlebutton:hover image {
 
 ## Ключи состояния
 
@@ -199,8 +234,8 @@
 ## Самопроверка
 
     группы:      core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report presets overview help
-    каркас:      sandbox_new 5751, sandbox_run 6001
-    утверждения: t_eq 6076, t_has 6103, t_out_has 6153, t_rc 6167
+    каркас:      sandbox_new 5853, sandbox_run 6103
+    утверждения: t_eq 6178, t_has 6205, t_out_has 6255, t_rc 6269
     заглушки:    13 штук, ищи sb_write_stub
 
 Запуск одной группы: `bash desktop-kit.sh selftest --only theme`
@@ -223,193 +258,196 @@
       176  overview_buttons
       202  overview_corners
       219  overview_widget
-      244  overview_terminal
-      274  presets_table
-      301  preset_args
-      309  presets_names
-      314  presets_list
-      323  preset_expand
-      359  ask_possible
-      371  ask_head
-      380  ask_num
-      417  ask_pick
-      463  ask_str
-      481  ask_yes
-      493  would
-      503  gi_get
-      504  gi_set
-      511  have
-      517  backup_once
-      547  restore_backup
-      622  state_set
-      637  state_get
-      652  remember
-      668  recall
-      686  css_strip
-      708  has_legacy_css
-      720  strip_legacy_css
-      772  icon_base_of
-      784  css_append
-      803  css_has
-      809  untangle_css
-      833  untangle_gtk4
-      837  untangle_gtk3
-      843  restart_gtk_apps
-      858  restart_conky
-      881  need_args
-      890  is_number
-      894  is_decimal
-      898  is_hex_colour
-      902  require_tools
-      918  help_buttons
-      970  diagnose_buttons
-      1085 buttons_args
-      1101 cmd_buttons
-      1404 darken_hex
-      1417 install_fluent_glyphs
-      1509 help_corners
-      1532 help_tune
-      1552 tune_recap
-      1558 cmd_tune
-      1607 tune_corners
-      1635 tune_buttons
-      1695 tune_widget
-      1761 tune_newtab
-      1825 tune_terminal
-      1854 tune_theme
-      1867 tune_font
-      1876 help_refresh
-      1893 cmd_refresh
-      1952 cmd_corners
-      2027 help_theme
-      2072 theme_repo_for
-      2103 help_themes
-      2133 themes_bank
-      2149 cmd_themes
-      2185 themes_list
-      2205 themes_install
-      2264 themes_check
-      2324 list_themes
-      2350 theme_exists
-      2361 lower
-      2363 theme_real_name
-      2375 theme_exists_ci
-      2394 theme_tokens
-      2405 theme_token
-      2409 theme_variant_pos
-      2437 theme_variant_of
-      2459 theme_rebuild
-      2493 theme_base_of
-      2507 theme_swap_variant
-      2519 theme_find_variant
-      2592 theme_light_by_sibling
-      2611 theme_has_dark_sibling
-      2623 theme_list_variants
-      2651 theme_switch_variant
-      2744 cmd_theme
-      2956 install_theme_check_symlink
-      2964 install_theme
-      3047 help_icons
-      3070 list_icon_themes
-      3082 cmd_icons
-      3196 help_font
-      3209 cmd_font
-      3279 help_widget
-      3304 cmd_widget
-      3475 conf_value
-      3487 hex_brightness
-      3503 help_terminal
-      3521 term_profile
-      3530 cmd_terminal
-      3635 apply_wal_palette
-      3666 newtab_tiles_plain
-      3688 help_newtab
-      3709 cmd_newtab
-      3798 rebuild_newtab
-      4009 tick
-      4026 find_wallpaper_dir
-      4041 current_wallpaper
-      4059 detect_resolution
-      4071 help_wallpapers
-      4094 week_themes
-      4103 wallpaper_urls
-      4112 cmd_wallpapers
-      4304 install_wallpaper_timer
-      4372 prune_wallpapers
-      4416 help_wall
-      4441 cmd_wall
-      4545 help_app
-      4563 cmd_app
-      4690 help_serve
-      4710 cmd_serve
-      4823 cmd_status
-      4916 help_revert
-      4952 revert_terminal
-      4990 revert_panel
-      5013 revert_app
-      5047 revert_keys
-      5083 revert_serve
-      5104 revert_gi_keys
-      5120 cmd_revert
-      5347 help_keys
-      5373 keys_list_paths
-      5378 keys_show
-      5402 keys_add
-      5488 keys_remove
-      5535 cmd_keys
-      5573 help_panel
-      5593 cmd_panel
-      5669 cmd_audit
-      5685 help_selftest
-      5744 sb_write_stub
-      5751 sandbox_new
-      5974 sb_set
-      5985 sb_get
-      5993 sb_dconf
-      6001 sandbox_run
-      6027 sandbox_verify
-      6051 sandbox_run_no
-      6059 sandbox_drop
-      6076 t_eq
-      6090 t_ne
-      6103 t_has
-      6123 t_hasnt
-      6141 t_hasnt_out
-      6153 t_out_has
-      6167 t_rc
-      6181 t_rc_not
-      6207 t_file
-      6219 t_nofile
-      6238 t_group
-      6247 t_ok
-      6249 t_fail
-      6254 t_skip
-      6259 t_detail
-      6267 cmd_selftest
-      6653 selftest_full
-      6696 st_core
-      6809 st_buttons
-      6954 st_corners
-      6981 st_theme
-      7129 st_icons
-      7163 st_font
-      7195 st_widget
-      7240 st_terminal
-      7269 st_newtab
-      7312 st_wall
-      7346 st_wallpapers
-      7388 st_keys
-      7432 st_panel
-      7460 st_app
-      7478 st_serve
-      7499 st_revert
-      7556 st_themes
-      7598 st_refresh
-      7646 st_tune
-      7727 st_report
-      7781 st_overview
-      7818 st_presets
-      7855 st_help
-      7910 usage
-      7965 help_settings
-      8038 cmd_help
+      245  overview_terminal
+      275  presets_table
+      302  preset_args
+      310  presets_names
+      315  presets_list
+      324  preset_expand
+      360  ask_possible
+      372  ask_head
+      381  ask_num
+      418  ask_pick
+      464  ask_str
+      482  ask_yes
+      494  would
+      504  gi_get
+      505  gi_set
+      512  have
+      518  backup_once
+      548  restore_backup
+      623  state_set
+      638  state_get
+      653  remember
+      669  recall
+      687  css_strip
+      709  has_legacy_css
+      721  strip_legacy_css
+      773  icon_base_of
+      785  css_append
+      804  css_has
+      810  untangle_css
+      834  untangle_gtk4
+      838  untangle_gtk3
+      844  restart_gtk_apps
+      859  restart_conky
+      882  need_args
+      891  is_number
+      895  is_decimal
+      899  is_hex_colour
+      903  require_tools
+      919  help_buttons
+      971  diagnose_buttons
+      1086 buttons_args
+      1102 cmd_buttons
+      1405 darken_hex
+      1418 install_fluent_glyphs
+      1510 help_corners
+      1533 help_tune
+      1553 tune_recap
+      1559 cmd_tune
+      1608 tune_corners
+      1636 tune_buttons
+      1696 tune_widget
+      1762 tune_newtab
+      1826 tune_terminal
+      1855 tune_theme
+      1868 tune_font
+      1877 help_refresh
+      1894 cmd_refresh
+      1953 cmd_corners
+      2028 help_theme
+      2073 theme_repo_for
+      2104 help_themes
+      2134 themes_bank
+      2150 cmd_themes
+      2186 themes_list
+      2206 themes_install
+      2265 themes_check
+      2325 list_themes
+      2351 theme_exists
+      2362 lower
+      2364 theme_real_name
+      2376 theme_exists_ci
+      2395 theme_tokens
+      2406 theme_token
+      2410 theme_variant_pos
+      2438 theme_variant_of
+      2460 theme_rebuild
+      2494 theme_base_of
+      2508 theme_swap_variant
+      2520 theme_find_variant
+      2593 theme_light_by_sibling
+      2612 theme_has_dark_sibling
+      2624 theme_list_variants
+      2652 theme_switch_variant
+      2745 cmd_theme
+      2957 install_theme_check_symlink
+      2965 install_theme
+      3048 help_icons
+      3071 list_icon_themes
+      3083 cmd_icons
+      3197 help_font
+      3210 cmd_font
+      3280 help_widget
+      3309 widget_modules_table
+      3321 widget_add_module
+      3365 cmd_widget
+      3547 conf_value
+      3559 hex_brightness
+      3575 help_terminal
+      3593 term_profile
+      3602 cmd_terminal
+      3707 apply_wal_palette
+      3738 newtab_tiles_plain
+      3760 help_newtab
+      3782 overview_newtab
+      3804 cmd_newtab
+      3900 rebuild_newtab
+      4111 tick
+      4128 find_wallpaper_dir
+      4143 current_wallpaper
+      4161 detect_resolution
+      4173 help_wallpapers
+      4196 week_themes
+      4205 wallpaper_urls
+      4214 cmd_wallpapers
+      4406 install_wallpaper_timer
+      4474 prune_wallpapers
+      4518 help_wall
+      4543 cmd_wall
+      4647 help_app
+      4665 cmd_app
+      4792 help_serve
+      4812 cmd_serve
+      4925 cmd_status
+      5018 help_revert
+      5054 revert_terminal
+      5092 revert_panel
+      5115 revert_app
+      5149 revert_keys
+      5185 revert_serve
+      5206 revert_gi_keys
+      5222 cmd_revert
+      5449 help_keys
+      5475 keys_list_paths
+      5480 keys_show
+      5504 keys_add
+      5590 keys_remove
+      5637 cmd_keys
+      5675 help_panel
+      5695 cmd_panel
+      5771 cmd_audit
+      5787 help_selftest
+      5846 sb_write_stub
+      5853 sandbox_new
+      6076 sb_set
+      6087 sb_get
+      6095 sb_dconf
+      6103 sandbox_run
+      6129 sandbox_verify
+      6153 sandbox_run_no
+      6161 sandbox_drop
+      6178 t_eq
+      6192 t_ne
+      6205 t_has
+      6225 t_hasnt
+      6243 t_hasnt_out
+      6255 t_out_has
+      6269 t_rc
+      6283 t_rc_not
+      6309 t_file
+      6321 t_nofile
+      6340 t_group
+      6349 t_ok
+      6351 t_fail
+      6356 t_skip
+      6361 t_detail
+      6369 cmd_selftest
+      6755 selftest_full
+      6798 st_core
+      6911 st_buttons
+      7056 st_corners
+      7083 st_theme
+      7231 st_icons
+      7265 st_font
+      7297 st_widget
+      7342 st_terminal
+      7371 st_newtab
+      7421 st_wall
+      7455 st_wallpapers
+      7497 st_keys
+      7541 st_panel
+      7569 st_app
+      7587 st_serve
+      7608 st_revert
+      7665 st_themes
+      7707 st_refresh
+      7755 st_tune
+      7836 st_report
+      7890 st_overview
+      7927 st_presets
+      7964 st_help
+      8019 usage
+      8074 help_settings
+      8147 cmd_help

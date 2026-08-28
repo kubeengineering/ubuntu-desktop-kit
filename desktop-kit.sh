@@ -237,6 +237,7 @@ overview_widget() {
 
     overview_presets widget
     note "что показывает виджет — секция conky.text в $CONKY_CONF"
+    note "добавить блок (процессор, память, сеть): $0 widget --modules"
     overview_tail widget
     return 0
 }
@@ -273,27 +274,27 @@ overview_terminal() {
 
 presets_table() {
     cat <<'EOF'
-buttons|thin|--size 46 34 --icon 20 --radius 0|large and thin, square highlight
-buttons|default|--size 32 32 --icon 16 --radius 999|as GNOME ships them
-buttons|big|--size 52 38 --icon 24 --radius 0|even larger, for high resolution
-buttons|square|--radius 0|square highlight, sizes untouched
-buttons|round|--radius 999|round highlight, sizes untouched
-buttons|keep|--glyphs keep --hover none|leave glyph and background to the theme
-corners|sharp|--radius 0|sharp, like Tabby and Windows
-corners|soft|--radius 6|barely rounded
-corners|round|--radius 12|rounded, GNOME default
-corners|extra|--radius 20|heavily rounded
-widget|dark|--colour 1e1e2e --text ffffff|dark backdrop, light text
-widget|light|--colour f2f2f2 --text 1e1e2e|light backdrop, dark text
-widget|flat|--radius 0|sharp corners
-widget|round|--radius 12|rounded corners
-widget|glass|--opacity 120|semi transparent backdrop
-widget|solid|--opacity 255|opaque backdrop
-terminal|opaque|--opacity 0|no transparency
-terminal|glass|--opacity 15|slightly see-through
-terminal|clear|--opacity 30|noticeably see-through
-newtab|big|--clock 140 --tile 150|large clock and tiles
-newtab|compact|--clock 80 --tile 110|small clock and tiles
+buttons|thin|--size 46 34 --icon 20 --radius 0|большие и тонкие, квадратная подсветка
+buttons|default|--size 32 32 --icon 16 --radius 999|как в GNOME из коробки
+buttons|big|--size 52 38 --icon 24 --radius 0|ещё крупнее, для высокого разрешения
+buttons|square|--radius 0|квадратная подсветка, размеры не трогать
+buttons|round|--radius 999|круглая подсветка, размеры не трогать
+buttons|keep|--glyphs keep --hover none|значки и фон оставить теме (WhiteSur и похожие)
+corners|sharp|--radius 0|острые, как в Tabby и Windows
+corners|soft|--radius 6|едва заметное скругление
+corners|round|--radius 12|скруглённые, как в GNOME
+corners|extra|--radius 20|сильное скругление
+widget|dark|--colour 1e1e2e --text ffffff|тёмная подложка, светлый текст
+widget|light|--colour f2f2f2 --text 1e1e2e|светлая подложка, тёмный текст
+widget|flat|--radius 0|прямые углы подложки
+widget|round|--radius 12|скруглённая подложка
+widget|glass|--opacity 120|полупрозрачная подложка
+widget|solid|--opacity 255|сплошная подложка
+terminal|opaque|--opacity 0|без прозрачности
+terminal|glass|--opacity 15|слегка просвечивает
+terminal|clear|--opacity 30|заметно просвечивает
+newtab|big|--clock 140 --tile 150|крупные часы и плитки
+newtab|compact|--clock 80 --tile 110|мелкие часы и плитки
 EOF
 }
 
@@ -1814,7 +1815,7 @@ tune_newtab() {
     ask_num "ширина плитки ярлыка" "$tile" 80 220
     tile="$ASK_ANSWER"
 
-    cmd_newtab --clock "$clock" --tile "$tile"
+    cmd_newtab --rebuild --clock "$clock" --tile "$tile"
     state_set NEWTAB_CLOCK "$clock"
     state_set NEWTAB_TILE "$tile"
     tune_recap "newtab --clock $clock --tile $tile"
@@ -3289,6 +3290,8 @@ widget — виджет conky на рабочем столе
   --light        светлая подложка с тёмным текстом
   --dark         тёмная подложка со светлым текстом
   --square       без скругления (то же, что --radius 0)
+  --modules      список готовых блоков для виджета
+  --add ИМЯ      добавить блок в виджет: cpu mem disk net uptime load temp
 
   Про --light: при переходе системы на светлую тему conky за ней НЕ идёт.
   Тёмная подложка так и останется тёмной, а если поменять только её —
@@ -3301,9 +3304,78 @@ widget — виджет conky на рабочем столе
 EOF
 }
 
+# Готовые строки для виджета. Добавляются в конец conky.text —
+# не нужно искать файл и вспоминать переменные conky.
+widget_modules_table() {
+    cat <<'EOF'
+cpu|Процессор: ${cpu}% ${cpubar 6}|загрузка процессора с полосой
+mem|Память: ${memperc}% ${membar 6}|занятая память с полосой
+disk|Диск: ${fs_used_perc /}% ${fs_bar 6 /}|занятость корня диска
+net|Сеть: v ${downspeedf wlp0s20f3}  ^ ${upspeedf wlp0s20f3}|скорость сети (интерфейс поправь под свой)
+uptime|Аптайм: ${uptime_short}|время работы с включения
+load|LA: ${loadavg}|средняя нагрузка
+temp|Температура: ${acpitemp}C|температура по ACPI
+EOF
+}
+
+widget_add_module() {
+    local name="$1"
+    local line
+    line=$(widget_modules_table | awk -F'|' -v n="$name" '$1 == n { print $2 }')
+    if [ -z "$line" ]; then
+        bad "модуля '$name' нет"
+        note "есть такие:"
+        widget_modules_table | awk -F'|' '{ printf "  %-7s %s\n", $1, $3 }' | dump
+        return 1
+    fi
+    if [ ! -f "$CONKY_CONF" ]; then
+        die "конфига conky нет: $CONKY_CONF"
+    fi
+    if ! grep -q 'conky.text' "$CONKY_CONF"; then
+        bad "в конфиге нет секции conky.text — добавить некуда"
+        return 1
+    fi
+    if grep -qF -- "$line" "$CONKY_CONF"; then
+        note "такая строка уже есть — второй раз не добавляю"
+        return 0
+    fi
+    if would "добавить в виджет: $line"; then
+        return 0
+    fi
+    backup_once "$CONKY_CONF" "conky-main.conf"
+    # conky.text = [[ ... ]] — вставляем перед закрывающей скобкой
+    local tmp
+    tmp=$(mktemp)
+    awk -v add="$line" '
+        /^\]\]/ && !done { print add; done=1 }
+        { print }
+    ' "$CONKY_CONF" > "$tmp"
+    if ! grep -qF -- "$line" "$tmp"; then
+        rm -f "$tmp"
+        bad "не нашёл конец секции conky.text (строку ]])"
+        note "добавь руками в $CONKY_CONF"
+        return 1
+    fi
+    mv "$tmp" "$CONKY_CONF"
+    ok "добавлено: $line"
+    restart_conky
+    return 0
+}
+
 cmd_widget() {
     if [ $# -eq 0 ]; then
         overview_widget
+        return 0
+    fi
+    if [ "${1:-}" = "--add" ]; then
+        need_args "--add" 2 "$#"
+        widget_add_module "$2"
+        return $?
+    fi
+    if [ "${1:-}" = "--modules" ]; then
+        head1 "модули виджета"
+        widget_modules_table | awk -F'|' '{ printf "  %-7s %s\n", $1, $3 }' | dump
+        note "добавить: $0 widget --add ИМЯ"
         return 0
     fi
     if preset_expand widget "${1:-}"; then
@@ -3689,7 +3761,8 @@ help_newtab() {
     cat <<'EOF'
 newtab — своя страница новой вкладки в Chrome
 
-  desktop-kit newtab                     пересобрать страницу
+  desktop-kit newtab                     показать ярлыки и как их менять
+  desktop-kit newtab --rebuild           пересобрать страницу
   desktop-kit newtab --add "Имя|URL"     добавить ярлык
   desktop-kit newtab --remove Имя        убрать ярлык
   desktop-kit newtab --list              показать ярлыки
@@ -3706,7 +3779,35 @@ newtab — своя страница новой вкладки в Chrome
 EOF
 }
 
+overview_newtab() {
+    overview_head "страница новой вкладки"
+
+    if [ -f "$NEWTAB_LINKS" ]; then
+        local n
+        n=$(grep -c '|' "$NEWTAB_LINKS" 2>/dev/null)
+        note "ярлыков сейчас: $n"
+        grep '|' "$NEWTAB_LINKS" 2>/dev/null | head -12 | dump
+    else
+        note "ярлыков пока нет"
+    fi
+    blank
+    note "добавить:   $0 newtab --add \"Имя|адрес\""
+    note "убрать:     $0 newtab --remove Имя"
+    note "пересобрать страницу: $0 newtab --rebuild"
+    blank
+    overview_presets newtab
+    note "настроить вопросами (добавление ссылок диалогом): $0 tune newtab"
+    note "все параметры: $0 help newtab"
+    return 0
+}
+
 cmd_newtab() {
+    # Голый вызов показывает ярлыки и как их менять. Пересборка страницы —
+    # по явному --rebuild: его зовут wall и wallpapers после смены обоев.
+    if [ $# -eq 0 ]; then
+        overview_newtab
+        return 0
+    fi
     if preset_expand newtab "${1:-}"; then
         shift
         set -- $PRESET_ARGS "$@"
@@ -3718,6 +3819,7 @@ cmd_newtab() {
     local tile=130
     while [ $# -gt 0 ]; do
         case "$1" in
+            --rebuild) action="rebuild"; shift ;;
             --add)     need_args "--add" 2 "$#"; action="add"; value="$2"; shift 2 ;;
             --remove)  need_args "--remove" 2 "$#"; action="remove"; value="$2"; shift 2 ;;
             --list)    action="list"; shift ;;
@@ -4290,7 +4392,7 @@ cmd_wallpapers() {
     ok "добавлено $((now - have_now)), всего в банке $now"
 
     if [ -x "$BIN_DIR/desktop-kit" ]; then
-        "$BIN_DIR/desktop-kit" newtab >/dev/null 2>&1
+        "$BIN_DIR/desktop-kit" newtab --rebuild >/dev/null 2>&1
         ok "страница новой вкладки пересобрана"
     fi
 
@@ -4529,7 +4631,7 @@ cmd_wall() {
     fi
 
     if [ -x "$BIN_DIR/desktop-kit" ]; then
-        ( "$BIN_DIR/desktop-kit" newtab >/dev/null 2>&1 & )
+        ( "$BIN_DIR/desktop-kit" newtab --rebuild >/dev/null 2>&1 & )
     fi
 
     ok "$(basename "$file")"
@@ -7276,7 +7378,14 @@ st_newtab() {
     if ! have python3; then
         t_skip "newtab: нет python3 — значки из Chrome не проверить"
     fi
+
+    # Голый вызов показывает ярлыки, ничего не пересобирая
     sandbox_run newtab
+    t_rc "голый newtab отработал" 0
+    t_nofile "страница при этом не собрана" "$SB/.local/share/newtab/index.html"
+    t_out_has "показан существующий ярлык" "Тест"
+    t_out_has "подсказано, как добавить" "--add"
+    sandbox_run newtab --rebuild
     t_file "страница собрана" "$page"
     t_has "ярлык из списка попал на страницу" "$page" "Тест"
     t_hasnt "в JavaScript не утекло слово local" "$page" "local idx"
@@ -7285,7 +7394,7 @@ st_newtab() {
     # ярлыки со спецсимволами — самое хрупкое место генератора
     sandbox_run newtab --add 'Кавычка"и&амперсанд|https://example.com/?a=1&b=2'
     t_rc "ярлык со спецсимволами принят" 0
-    sandbox_run newtab
+    sandbox_run newtab --rebuild
     t_has "спецсимволы не сломали страницу" "$page" "</html>"
     t_has "амперсанд в адресе экранирован" "$page" "a=1&amp;"
 
