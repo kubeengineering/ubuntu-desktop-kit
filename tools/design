@@ -1,0 +1,146 @@
+#!/usr/bin/env bash
+# design — запускалка desktop-kit, которая сама держит себя в актуальном виде.
+#
+# Смысл: не таскать скрипт через мессенджер и не помнить, где лежит свежая
+# версия. Набрал `design`, он посмотрел на гит, при необходимости обновился
+# и отработал. Все аргументы уходят в desktop-kit как есть:
+#
+#   design                  показать команды
+#   design tune             мастер настройки
+#   design buttons thin     набор параметров
+#   design --update         только обновиться, ничего не запуская
+#   design --version        какая версия лежит локально
+#   design --offline ...    не ходить в сеть вообще
+#
+# Обновление тихое и безопасное: скачанное сначала проверяется на
+# синтаксис, и только потом подменяет рабочий файл. Битую версию
+# запускалка не поставит, а без сети просто возьмёт то, что уже есть.
+
+set -uo pipefail
+
+REPO_RAW="https://raw.githubusercontent.com/kubeengineering/ubuntu-desktop-kit/main"
+KIT_DIR="${XDG_DATA_HOME:-$HOME/.local/share}/desktop-kit"
+KIT="$KIT_DIR/desktop-kit.sh"
+STAMP="$KIT_DIR/last-check"
+# Как часто заглядывать на гит, в секундах. Чаще смысла нет: скрипт
+# меняется не ежеминутно, а лишний запрос — лишняя задержка запуска.
+CHECK_EVERY=3600
+
+mkdir -p "$KIT_DIR"
+
+say()  { printf '\033[38;5;108m  design\033[0m  %s\n' "$*"; }
+warn() { printf '\033[38;5;174m  design\033[0m  %s\n' "$*" >&2; }
+
+# Скачать свежую версию и подменить рабочую, если она отличается и цела.
+update_kit() {
+    local quiet="${1:-0}"
+    local tmp
+    tmp=$(mktemp) || return 1
+
+    if ! curl -fsSL --max-time 45 "$REPO_RAW/desktop-kit.sh" -o "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        if [ "$quiet" = "0" ]; then
+            warn "гит недоступен — работаю тем, что есть"
+        fi
+        return 1
+    fi
+
+    # Пустой или обрезанный ответ бывает при обрыве связи и при
+    # перехвате трафика — такое ставить нельзя.
+    if [ ! -s "$tmp" ]; then
+        rm -f "$tmp"
+        warn "скачалось пусто — оставляю прежнюю версию"
+        return 1
+    fi
+    if ! head -1 "$tmp" | grep -q '^#!/usr/bin/env bash'; then
+        rm -f "$tmp"
+        warn "скачался не скрипт — оставляю прежнюю версию"
+        return 1
+    fi
+    if ! bash -n "$tmp" 2>/dev/null; then
+        rm -f "$tmp"
+        warn "в свежей версии синтаксическая ошибка — оставляю прежнюю"
+        return 1
+    fi
+
+    date +%s > "$STAMP"
+
+    if [ -f "$KIT" ]; then
+        if cmp -s "$tmp" "$KIT"; then
+            rm -f "$tmp"
+            if [ "$quiet" = "0" ]; then
+                say "версия уже свежая"
+            fi
+            return 0
+        fi
+    fi
+
+    mv "$tmp" "$KIT"
+    chmod +x "$KIT"
+    local ver
+    ver=$(grep -m1 '^VERSION=' "$KIT" | cut -d'"' -f2)
+    say "обновлено до версии ${ver:-неизвестно}"
+    return 0
+}
+
+# Пора ли проверять обновление
+should_check() {
+    if [ ! -f "$KIT" ]; then
+        return 0
+    fi
+    if [ ! -f "$STAMP" ]; then
+        return 0
+    fi
+    local last now
+    last=$(cat "$STAMP" 2>/dev/null)
+    now=$(date +%s)
+    case "$last" in
+        ''|*[!0-9]*) return 0 ;;
+    esac
+    if [ $((now - last)) -ge "$CHECK_EVERY" ]; then
+        return 0
+    fi
+    return 1
+}
+
+# --- разбор своих флагов ---------------------------------------------
+OFFLINE=0
+case "${1:-}" in
+    --update)
+        update_kit 0
+        exit $?
+        ;;
+    --version)
+        if [ -f "$KIT" ]; then
+            grep -m1 '^VERSION=' "$KIT" | cut -d'"' -f2
+            say "файл: $KIT"
+        else
+            warn "скрипт ещё не скачан, запусти: design --update"
+            exit 1
+        fi
+        exit 0
+        ;;
+    --where)
+        echo "$KIT"
+        exit 0
+        ;;
+    --offline)
+        OFFLINE=1
+        shift
+        ;;
+esac
+
+# --- обновление по расписанию ----------------------------------------
+if [ "$OFFLINE" = "0" ]; then
+    if should_check; then
+        update_kit 1
+    fi
+fi
+
+if [ ! -f "$KIT" ]; then
+    warn "скрипт не скачан и гит недоступен"
+    warn "проверь сеть и повтори: design --update"
+    exit 1
+fi
+
+exec bash "$KIT" "$@"
