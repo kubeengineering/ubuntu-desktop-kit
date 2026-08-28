@@ -119,7 +119,7 @@ if [ "$?" = "0" ]; then say 0 "--timer off принят одним словом"
 echo
 echo "== dry-run ничего не меняет =="
 BEFORE=$(md5sum "$C3" | cut -d' ' -f1)
-run --dry-run buttons > /dev/null 2>&1
+run --dry-run buttons default > /dev/null 2>&1
 run --dry-run corners --radius 8 > /dev/null 2>&1
 run --dry-run widget --radius 20 > /dev/null 2>&1
 AFTER=$(md5sum "$C3" | cut -d' ' -f1)
@@ -158,8 +158,8 @@ if grep -q 'border-radius: 6px' "$C4"; then say 0 "радиус 6px"; else say 1
 
 echo
 echo "== повтор не дублирует =="
-run buttons > /dev/null 2>&1
-run buttons > /dev/null 2>&1
+run buttons default > /dev/null 2>&1
+run buttons default > /dev/null 2>&1
 N=$(grep -c 'dk:buttons-begin' "$C4")
 if [ "$N" = "1" ]; then say 0 "блок кнопок один"; else say 1 "блоков: $N"; fi
 
@@ -306,7 +306,7 @@ else
 fi
 
 # --dry-run revert не должен откатывать
-run buttons > /dev/null 2>&1
+run buttons default > /dev/null 2>&1
 run --dry-run revert all > "$T/o" 2>&1
 if grep -q 'dk:buttons-begin' "$C3"; then
     say 0 "--dry-run revert ничего не откатил"
@@ -331,7 +331,7 @@ else
 fi
 
 # правка, сделанная после установки, не должна пропасть при откате
-run buttons > /dev/null 2>&1
+run buttons default > /dev/null 2>&1
 echo "/* правка после установки */" >> "$C3"
 run revert all > /dev/null 2>&1
 if grep -q 'правка после установки' "$C3"; then

@@ -141,6 +141,127 @@ confirm() {
 
 
 # =====================================================================
+#  Обзор команды: что сейчас, что можно
+# =====================================================================
+#
+# Команда без аргументов НЕ должна ничего менять. Так устроены git,
+# docker, systemctl: голый вызов показывает положение дел, а действие
+# требует явного слова. Раньше `buttons` молча применял умолчания и
+# заодно лез в сеть за значками — то есть менял систему в ответ на
+# попытку посмотреть, что он умеет.
+#
+# Команды-действия сюда не входят: `wall` и `wallpapers` вызываются
+# горячей клавишей и таймером, а `newtab` — автоматикой после смены
+# обоев. Им голый вызов и означает «сделай».
+
+overview_head() {
+    head1 "$1"
+    blank
+}
+
+overview_presets() {
+    local cmd="$1"
+    note "ГОТОВЫЕ НАБОРЫ:"
+    presets_list "$cmd" | dump
+    blank
+}
+
+overview_tail() {
+    local cmd="$1"
+    note "применить набор:     $0 $cmd ИМЯ"
+    note "настроить вопросами: $0 tune $cmd"
+    note "все параметры:       $0 help $cmd"
+}
+
+overview_buttons() {
+    overview_head "кнопки заголовка"
+
+    local applied
+    applied=$(state_get BTN_ARGS)
+    if [ -n "$applied" ]; then
+        ok "сейчас применено: $applied"
+    else
+        note "мы кнопки ещё не трогали — вид задаёт тема"
+    fi
+    note "тема значков: $(gi_get icon-theme)"
+
+    local f
+    for f in "$CSS3" "$CSS4"; do
+        if css_has buttons "$f"; then
+            note "правила есть в $(basename "$(dirname "$f")")"
+        fi
+    done
+    blank
+
+    overview_presets buttons
+    note "если значков не видно:  $0 buttons --diagnose"
+    overview_tail buttons
+    return 0
+}
+
+overview_corners() {
+    overview_head "скругление углов"
+
+    local applied
+    applied=$(state_get CORNERS_ARGS)
+    if [ -n "$applied" ]; then
+        ok "сейчас применено: $applied"
+    else
+        note "мы углы ещё не трогали — форму задаёт тема"
+    fi
+    blank
+
+    overview_presets corners
+    overview_tail corners
+    return 0
+}
+
+overview_widget() {
+    overview_head "виджет conky"
+
+    if [ ! -f "$CONKY_CONF" ]; then
+        bad "конфига нет: $CONKY_CONF"
+        note "виджет не установлен, настраивать нечего"
+        return 0
+    fi
+
+    note "подложка: #$(conf_value own_window_colour "$CONKY_CONF")"
+    note "текст:    #$(conf_value default_color "$CONKY_CONF")"
+    note "плотность: $(conf_value own_window_argb_value "$CONKY_CONF")"
+    local r
+    r=$(state_get CONKY_RADIUS)
+    if [ -n "$r" ]; then
+        note "скругление: $r"
+    fi
+    blank
+
+    overview_presets widget
+    note "что показывает виджет — секция conky.text в $CONKY_CONF"
+    overview_tail widget
+    return 0
+}
+
+overview_terminal() {
+    overview_head "GNOME Terminal"
+
+    local prof
+    prof=$(term_profile)
+    if [ -z "$prof" ]; then
+        bad "профиль не найден"
+        return 0
+    fi
+    note "прозрачность: $(gsettings get "$prof" background-transparency-percent 2>/dev/null)"
+    note "своя палитра: $(gsettings get "$prof" use-theme-colors 2>/dev/null)"
+    note "шрифт:        $(gsettings get "$prof" font 2>/dev/null)"
+    blank
+
+    overview_presets terminal
+    note "цвета из обоев:      $0 terminal --palette wal"
+    overview_tail terminal
+    return 0
+}
+
+# =====================================================================
 #  Пресеты: именованные наборы параметров
 # =====================================================================
 #
@@ -978,6 +1099,11 @@ buttons_args() {
 }
 
 cmd_buttons() {
+    # Ничего не меняем в ответ на попытку посмотреть
+    if [ $# -eq 0 ]; then
+        overview_buttons
+        return 0
+    fi
     if preset_expand buttons "${1:-}"; then
         shift
         set -- $PRESET_ARGS "$@"
@@ -1391,6 +1517,7 @@ EOF
     cat <<'EOF' 
 
   --radius N    радиус в пикселях, по умолчанию 0 (строго прямые углы)
+  --square      то же, что --radius 0
 
   Мутер скругление окон не настраивает — форму задаёт только тема,
   поэтому правится через css. В bspwm то же самое делает picom своим
@@ -1823,6 +1950,10 @@ cmd_refresh() {
 }
 
 cmd_corners() {
+    if [ $# -eq 0 ]; then
+        overview_corners
+        return 0
+    fi
     if preset_expand corners "${1:-}"; then
         shift
         set -- $PRESET_ARGS "$@"
@@ -1832,6 +1963,7 @@ cmd_corners() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --radius) need_args "--radius" 2 "$#"; radius="${2:-0}"; shift 2 ;;
+            --square) radius=0; shift ;;
             -h|--help) help_corners; return 0 ;;
             *) die "corners: неизвестный параметр $1" ;;
         esac
@@ -3170,6 +3302,10 @@ EOF
 }
 
 cmd_widget() {
+    if [ $# -eq 0 ]; then
+        overview_widget
+        return 0
+    fi
     if preset_expand widget "${1:-}"; then
         shift
         set -- $PRESET_ARGS "$@"
@@ -3392,6 +3528,10 @@ term_profile() {
 }
 
 cmd_terminal() {
+    if [ $# -eq 0 ]; then
+        overview_terminal
+        return 0
+    fi
     if preset_expand terminal "${1:-}"; then
         shift
         set -- $PRESET_ARGS "$@"
@@ -6508,7 +6648,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report presets help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report presets overview help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -6717,7 +6857,7 @@ st_buttons() {
     t_hasnt "старый размер убран" "$c4" "min-width: 40px"
 
     # база наследника не должна накручиваться сама на себя
-    sandbox_run buttons
+    sandbox_run buttons default
     t_eq "наследник не наслоился сам на себя" "Adwaita-dk-glyphs" \
         "$(sb_get org.gnome.desktop.interface icon-theme)"
     t_nofile "нет двойного наследника" "$SB/.local/share/icons/Adwaita-dk-glyphs-dk-glyphs"
@@ -6737,7 +6877,7 @@ st_buttons() {
     sandbox_new
     printf '/* чужое правило */\nwindow { color: red; }\n/* look-begin */\nbutton.titlebutton { min-width: 46px; }\n/* look-end */\n' \
         > "$SB/.config/gtk-3.0/gtk.css"
-    sandbox_run buttons
+    sandbox_run buttons default
     t_hasnt "блок старого look.sh убран" "$SB/.config/gtk-3.0/gtk.css" "look-begin"
     t_has "чужое правило при этом уцелело" "$SB/.config/gtk-3.0/gtk.css" "чужое правило"
     t_has "наш блок записан" "$SB/.config/gtk-3.0/gtk.css" "dk:buttons-begin"
@@ -6783,7 +6923,7 @@ window { color: red; }
     mkdir -p "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar"
     printf '[Icon Theme]\nName=x\n' > "$SB/.local/share/icons/Papirus-Dark-Fluent-Titlebar/index.theme"
     sb_set org.gnome.desktop.interface icon-theme "Papirus-Dark-Fluent-Titlebar"
-    sandbox_run buttons
+    sandbox_run buttons default
     # Наследуем от НАСТОЯЩЕЙ темы, а не от наследника предшественника:
     # иначе цепочка наследования росла бы с каждым переходом.
     t_eq "наследник построен от настоящей базы" "Papirus-Dark-dk-glyphs" \
@@ -6798,7 +6938,7 @@ window { color: red; }
     mkdir -p "$SB/.themes/Graphite-Dark/gtk-4.0" "$SB/.config/gtk-4.0"
     printf '/* внутри темы */\n' > "$SB/.themes/Graphite-Dark/gtk-4.0/gtk.css"
     ln -sf "$SB/.themes/Graphite-Dark/gtk-4.0/gtk.css" "$SB/.config/gtk-4.0/gtk.css"
-    sandbox_run buttons
+    sandbox_run buttons default
     if [ -L "$SB/.config/gtk-4.0/gtk.css" ]; then
         t_fail "симлинк gtk-4.0 не снят — правки уедут внутрь темы"
     else
@@ -6817,7 +6957,7 @@ st_corners() {
 
     local c4="$SB/.config/gtk-4.0/gtk.css"
 
-    sandbox_run buttons
+    sandbox_run buttons default
     sandbox_run corners --radius 8
     t_has "радиус применился" "$c4" "border-radius: 8px"
     t_has "блок кнопок уцелел" "$c4" "dk:buttons-begin"
@@ -6999,7 +7139,7 @@ st_icons() {
         "$(sb_get org.gnome.desktop.interface icon-theme)"
 
     # значки заголовка не должны осиротеть при смене базовой темы
-    sandbox_run buttons
+    sandbox_run buttons default
     t_eq "наследник поверх Papirus" "Papirus-dk-glyphs" \
         "$(sb_get org.gnome.desktop.interface icon-theme)"
     sandbox_run icons Papirus-Dark
@@ -7088,7 +7228,7 @@ st_widget() {
 
     # нет конфига — внятный отказ
     rm -f "$conf"
-    sandbox_run widget
+    sandbox_run widget round
     t_rc_not "без конфига conky команда отказывает"
     t_out_has "путь к конфигу назван" "conky"
 
@@ -7363,7 +7503,7 @@ st_revert() {
     local c3="$SB/.config/gtk-3.0/gtk.css"
     local conf="$SB/.config/conky/main.conf"
 
-    sandbox_run buttons
+    sandbox_run buttons default
     sandbox_run corners --radius 8
     sandbox_run theme Graphite-Light
     sandbox_run icons Papirus
@@ -7395,7 +7535,7 @@ st_revert() {
     # когда поздних правок не было — файл восстанавливается целиком
     sandbox_drop
     sandbox_new
-    sandbox_run buttons
+    sandbox_run buttons default
     sandbox_run revert all
     local c3b="$SB/.config/gtk-3.0/gtk.css"
     t_eq "файл вернулся дословно" \
@@ -7634,6 +7774,43 @@ st_report() {
             ;;
         *) t_ok "вложенных архивов нет" ;;
     esac
+
+    sandbox_drop
+}
+
+st_overview() {
+    t_group "голый вызов: показывает, а не применяет"
+    sandbox_new
+
+    # Команда, меняющая систему, не должна ничего делать в ответ на
+    # попытку посмотреть, что она умеет.
+    sandbox_run buttons
+    t_rc "голый buttons отработал" 0
+    t_nofile "и ничего не применил" "$SB/.config/gtk-4.0/gtk.css"
+    t_out_has "показал наборы" "thin"
+    t_out_has "подсказал, как настроить вопросами" "tune buttons"
+    if [ -f "$SB_STORE/curl.log" ]; then
+        t_fail "голый вызов полез в сеть за значками"
+    else
+        t_ok "в сеть не ходил"
+    fi
+
+    sandbox_run corners
+    t_nofile "голый corners тоже ничего не применил" "$SB/.config/gtk-4.0/gtk.css"
+    t_out_has "показал свои наборы" "sharp"
+
+    sandbox_run terminal
+    t_out_has "терминал показал состояние" "прозрачность"
+    t_out_has "и свои наборы" "glass"
+
+    # А с аргументом — работает как раньше
+    sandbox_run corners sharp
+    t_has "с набором применяет" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 0px"
+
+    # Команды-действия трогать нельзя: их зовут клавиша, таймер и
+    # автоматика после смены обоев.
+    sandbox_run wall
+    t_rc "wall без аргументов по-прежнему меняет обои" 0
 
     sandbox_drop
 }
