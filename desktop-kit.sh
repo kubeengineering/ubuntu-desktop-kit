@@ -3436,10 +3436,10 @@ cmd_widget() {
     fi
     state_set CONKY_ALPHA "$opacity"
 
-    r=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:0:2}))/255}")
-    g=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:2:2}))/255}")
-    b=$(awk "BEGIN{printf \"%.3f\", $((16#${colour:4:2}))/255}")
-    local a=$(awk "BEGIN{printf \"%.3f\", $opacity/255}")
+    r=$(LC_ALL=C awk "BEGIN{printf \"%.3f\", $((16#${colour:0:2}))/255}")
+    g=$(LC_ALL=C awk "BEGIN{printf \"%.3f\", $((16#${colour:2:2}))/255}")
+    b=$(LC_ALL=C awk "BEGIN{printf \"%.3f\", $((16#${colour:4:2}))/255}")
+    local a=$(LC_ALL=C awk "BEGIN{printf \"%.3f\", $opacity/255}")
 
     if would "нарисовать подложку радиусом $radius, цвет #$colour, плотность $opacity"; then
         return 0
@@ -3523,6 +3523,14 @@ LUAEOF
     fi
 
     ok "подложка: радиус ${radius}px, цвет #${colour}, плотность ${opacity}"
+
+    # Дробные числа обязаны быть с ТОЧКОЙ. В русской локали awk печатает
+    # запятую, и такое значение не примет ни Lua в конфиге conky, ни dconf.
+    # Поймано на живой Ubuntu с ru_RU.UTF-8 — в C-локали не воспроизводится.
+    if grep -q 'local R, G, B, A = .*,.*,.*,.*[0-9],[0-9]' "$CONKY_LUA" 2>/dev/null; then
+        bad "в lua-файл попало дробное число с запятой — conky его не поймёт"
+        note "проверь локаль: LC_ALL=C должен стоять перед awk"
+    fi
 
     # Предупредить о белом на белом, пока человек не увидел это глазами.
     local bright
@@ -5732,7 +5740,7 @@ cmd_panel() {
             :
         else
             local value
-            value=$(awk "BEGIN{printf \"%.2f\", $opacity/100}")
+            value=$(LC_ALL=C awk "BEGIN{printf \"%.2f\", $opacity/100}")
             remember DTP_OPACITY "$(dconf read $DTP/trans-panel-opacity 2>/dev/null)"
             remember DTP_CUSTOM "$(dconf read $DTP/trans-use-custom-opacity 2>/dev/null)"
             dconf write $DTP/trans-use-custom-opacity true 2>/dev/null
@@ -7545,6 +7553,8 @@ st_panel() {
     printf "/org/gnome/shell/extensions/dash-to-panel/panel-sizes '{\"0\":48}'\n" \
         > "$SB_STORE/dconf"
 
+    # Регрессия локали: awk в ru_RU.UTF-8 печатает "0,00" вместо "0.00",
+    # и dconf такое значение не принимает. Проверяем именно точку.
     sandbox_run panel --opacity 0
     t_eq "своя прозрачность включена" "true" \
         "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/trans-use-custom-opacity)"
