@@ -1246,8 +1246,212 @@ theme_repo_for() {
         WhiteSur*) echo "https://github.com/vinceliuice/WhiteSur-gtk-theme.git" ;;
         Qogir*)    echo "https://github.com/vinceliuice/Qogir-theme.git" ;;
         Jasper*)   echo "https://github.com/vinceliuice/Jasper-gtk-theme.git" ;;
+        Lavanda*)  echo "https://github.com/vinceliuice/Lavanda-gtk-theme.git" ;;
+        ChromeOS*) echo "https://github.com/vinceliuice/ChromeOS-theme.git" ;;
+        Win11*)    echo "https://github.com/vinceliuice/Win11-gtk-theme.git" ;;
+        Orianin*)  echo "https://github.com/vinceliuice/Orianin-gtk-theme.git" ;;
+        Magnetic*) echo "https://github.com/vinceliuice/Magnetic-gtk-theme.git" ;;
+        Vimix*)    echo "https://github.com/vinceliuice/Vimix-gtk-themes.git" ;;
+        Layan*)    echo "https://github.com/vinceliuice/Layan-gtk-theme.git" ;;
         *) echo "" ;;
     esac
+}
+
+# =====================================================================
+#  themes — банк готовых тем
+# =====================================================================
+#
+# Отбор не по красоте, а по одному техническому признаку: рисует ли тема
+# кнопки заголовка САМА. Такая тема задаёт кнопке собственную картинку, и
+# наши значки в ней просто не видны — ровно то, что вышло с WhiteSur.
+# Совместимость каждой темы проверена по её исходникам: искали
+# background-image и -gtk-icon-source в правилах button.titlebutton
+# (GTK3) и windowcontrols > button (GTK4).
+
+help_themes() {
+    cat <<'EOF'
+themes — банк готовых тем оформления
+
+  desktop-kit themes                     список тем банка
+  desktop-kit themes --install ИМЯ       скачать и собрать одну
+  desktop-kit themes --install ИМЯ ИМЯ   сразу несколько
+  desktop-kit themes --all               поставить весь банк
+  desktop-kit themes --check ИМЯ         проверить установленную тему
+
+  В банке только темы, которые НЕ рисуют кнопки заголовка сами, то есть
+  такие, где наши значки остаются на месте. Проверено по исходникам
+  каждой темы, а не по описанию на её странице.
+
+  Не вошли и почему:
+    WhiteSur   рисует кнопки в стиле macOS собственной картинкой
+    Layan      то же самое
+    Colloid    по умолчанию рисует кружки macOS
+    Toffee     рисует кнопки сама
+  Поставить их можно обычным theme --install, но кнопки будут теминые.
+  Если тема нравится: buttons --glyphs keep --hover none.
+
+  Сборка требует git и sassc. Флаг -l у установщиков вендора трогать не
+  надо: он делает ~/.config/gtk-4.0/gtk.css симлинком внутрь темы, и наши
+  правила уехали бы туда же.
+
+  После установки посмотреть имена: desktop-kit theme --list
+EOF
+}
+
+themes_bank() {
+    cat <<'EOF'
+Graphite|строгая чёрно-белая, минимализм
+Fluent|как Windows 11: мягкие тени, скруглённые панели
+Qogir|спокойная и округлая, ближе к духу GNOME
+Orchis|Material Design, сочные акценты
+Jasper|плоская и яркая, крупные элементы
+Lavanda|пастельная лавандовая, мягкие переходы
+ChromeOS|светлая и чистая, в духе ChromeOS
+Win11|подражание Windows 11, отдельная от Fluent
+Orianin|современная тёмная с неоновым акцентом
+Magnetic|контрастная, крупная типографика
+Vimix|плоская с цветными акцентами, много расцветок
+EOF
+}
+
+cmd_themes() {
+    local action="list"
+    local names=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --install)
+                need_args "--install" 2 "$#"
+                action="install"
+                shift
+                while [ $# -gt 0 ]; do
+                    case "$1" in
+                        -*) break ;;
+                        *) names="$names $1"; shift ;;
+                    esac
+                done
+                ;;
+            --all)     action="all"; shift ;;
+            --check)   need_args "--check" 2 "$#"; action="check"; names="$2"; shift 2 ;;
+            -h|--help) help_themes; return 0 ;;
+            *) die "themes: неизвестный параметр $1" ;;
+        esac
+    done
+
+    case "$action" in
+        list)      themes_list ;;
+        all)       themes_install $(themes_bank | cut -d"|" -f1) ;;
+        install)
+            if [ -z "$names" ]; then
+                die "themes: назови тему, например: $0 themes --install Graphite"
+            fi
+            themes_install $names
+            ;;
+        check)     themes_check "$names" ;;
+    esac
+}
+
+themes_list() {
+    head1 "банк тем"
+    note "все совместимы с нашими значками заголовка"
+    blank
+    local nm
+    local st
+    local mark
+    themes_bank | while IFS="|" read -r nm st; do
+        mark=""
+        if list_themes | grep -q "^$nm"; then
+            mark="уже есть"
+        fi
+        printf "  %-10s %-44s %s\n" "$nm" "$st" "$mark"
+    done
+    blank
+    note "поставить:  $0 themes --install Graphite Fluent Qogir"
+    note "весь банк:  $0 themes --all   (каждая собирается из исходников)"
+    note "примерить:  $0 theme ИМЯ-Dark   потом  $0 theme --light"
+}
+
+themes_install() {
+    local nm
+    local ok_n=0
+    local bad_n=0
+    head1 "установка тем"
+    require_tools git sassc
+    # Установщики вендоров кладут тему в ~/.themes только если каталог уже
+    # существует, иначе выбирают другой путь. Создаём заранее.
+    mkdir -p "$HOME/.themes"
+    for nm in "$@"; do
+        blank
+        note "--- $nm ---"
+        if [ -z "$(theme_repo_for "$nm")" ]; then
+            bad "темы '$nm' в банке нет"
+            note "список: $0 themes"
+            bad_n=$((bad_n + 1))
+            continue
+        fi
+        if install_theme "$nm"; then
+            ok_n=$((ok_n + 1))
+        else
+            bad_n=$((bad_n + 1))
+        fi
+    done
+    blank
+    ok "поставлено: $ok_n, не вышло: $bad_n"
+    note "все имена:  $0 theme --list"
+    note "примерить:  $0 theme ИМЯ"
+    if [ "$bad_n" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# Проверка установленной темы на совместимость с нашими значками.
+themes_check() {
+    local nm="$1"
+    local dir=""
+    local d
+    for d in "$HOME/.themes/$nm" "$HOME/.local/share/themes/$nm" "$SYS_THEMES/$nm"; do
+        if [ -d "$d" ]; then
+            dir="$d"
+        fi
+    done
+    if [ -z "$dir" ]; then
+        bad "темы '$nm' на диске нет"
+        note "список установленных: $0 theme --list"
+        return 1
+    fi
+    head1 "проверка темы $nm"
+    note "каталог: $dir"
+
+    local f
+    local risky=0
+    local hits
+    local label
+    for f in "$dir/gtk-3.0/gtk.css" "$dir/gtk-4.0/gtk.css"; do
+        if [ ! -f "$f" ]; then
+            continue
+        fi
+        label=$(basename "$(dirname "$f")")
+        # Ищем правила кнопок, где тема подставляет собственную картинку.
+        hits=$(grep "titlebutton\|windowcontrols" "$f" 2>/dev/null \
+               | grep -c "background-image\|icon-source\|icontheme")
+        if [ "$hits" -gt 0 ]; then
+            bad "$label: кнопки рисуются картинкой ($hits мест)"
+            risky=1
+        else
+            ok "$label: кнопки отданы теме значков"
+        fi
+    done
+
+    if [ "$risky" = "1" ]; then
+        blank
+        note "наши значки в этой теме видно не будет"
+        note "если тема всё равно нравится:"
+        note "  $0 buttons --glyphs keep --hover none"
+        return 1
+    fi
+    blank
+    ok "тема совместима — наши кнопки в ней работают"
+    return 0
 }
 
 list_themes() {
@@ -5503,7 +5707,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -6408,6 +6612,40 @@ st_revert() {
     sandbox_drop
 }
 
+st_themes() {
+    t_group "themes: банк готовых тем"
+    sandbox_new
+
+    sandbox_run themes
+    t_rc "список банка выводится" 0
+    t_out_has "в списке есть Graphite" "Graphite"
+    t_out_has "в списке есть Qogir" "Qogir"
+
+    sandbox_run themes --install НетТакойТемы
+    t_rc_not "тема вне банка отвергается"
+    t_out_has "сказано, где смотреть список" "themes"
+
+    # Совместимость определяется по исходникам темы, а не по названию.
+    mkdir -p "$SB/.themes/Хорошая/gtk-3.0" "$SB/.themes/Плохая/gtk-3.0"
+    printf 'button.titlebutton { min-width: 24px; }
+'         > "$SB/.themes/Хорошая/gtk-3.0/gtk.css"
+    printf 'button.titlebutton.close { background-image: url("c.png"); }
+'         > "$SB/.themes/Плохая/gtk-3.0/gtk.css"
+
+    sandbox_run themes --check Хорошая
+    t_rc "совместимая тема проходит проверку" 0
+    t_out_has "сказано, что кнопки отданы значкам" "отданы теме значков"
+
+    sandbox_run themes --check Плохая
+    t_rc_not "тема со своими кнопками не проходит"
+    t_out_has "предложен минимальный режим" "hover none"
+
+    sandbox_run themes --check НетНаДиске
+    t_rc_not "отсутствующая тема отвергается"
+
+    sandbox_drop
+}
+
 # ------------------------------------------------- согласованность справки
 
 st_help() {
@@ -6475,6 +6713,7 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   buttons      кнопки заголовка: размер, значки, подсветка
   corners      скругление углов окон
   theme        тема оформления, цветовая схема
+  themes       банк готовых тем: список и установка
   icons        тема значков, цвет папок
   font         шрифт интерфейса и моноширинный
   widget       виджет conky: скругление, цвет, плотность
@@ -6612,6 +6851,7 @@ cmd_help() {
         wallpapers) help_wallpapers ;;
         wall)       help_wall ;;
         app)        help_app ;;
+        themes)     help_themes ;;
         keys)       help_keys ;;
         panel)      help_panel ;;
         serve)      help_serve ;;
@@ -6680,6 +6920,7 @@ case "$COMMAND" in
     wall)       cmd_wall "$@" ;;
     app)        cmd_app "$@" ;;
     serve)      cmd_serve "$@" ;;
+    themes)     cmd_themes "$@" ;;
     keys)       cmd_keys "$@" ;;
     panel)      cmd_panel "$@" ;;
     audit)      cmd_audit "$@" ;;
