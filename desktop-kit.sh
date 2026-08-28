@@ -1844,6 +1844,24 @@ theme_switch_variant() {
     if [ "$have" = "unknown" ]; then
         note "в имени '$cur' нет суффикса варианта, парную тему искать негде"
     fi
+
+    # Точной пары нет, но рядом может лежать вариант того же семейства:
+    # у Graphite-Dark-Square это Graphite-Light. Не подставляем молча —
+    # хвост имени обычно значит другую форму кнопок или отступы — но
+    # показать такую тему полезнее, чем весь список установленных.
+    local family
+    family=$(theme_token "$cur" 1)
+    local near
+    near=$(theme_list_variants "$want" "$cur" | grep "^$family" | head -4)
+    if [ -n "$near" ]; then
+        note "того же семейства ($family) и нужной яркости:"
+        printf '%s\n' "$near" | dump
+        note "применить: $0 theme $(printf '%s' "$near" | head -1)"
+        note "если нужно поменять только схему для GTK4-приложений:"
+        note "  $0 theme $flag --scheme-only"
+        return 1
+    fi
+
     repo=$(theme_repo_for "$base")
     if [ -n "$repo" ]; then
         note "эту тему знаю, вариант можно собрать:"
