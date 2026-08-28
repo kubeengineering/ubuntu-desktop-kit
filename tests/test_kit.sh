@@ -345,9 +345,14 @@ echo
 echo "== selftest =="
 run selftest > "$T/o" 2>&1
 if grep -q 'проверок пройдено' "$T/o"; then say 0 "самопроверка отработала"; else say 1 "самопроверка молчит"; tail -5 "$T/o"; fi
-if [ -f "$HOME/desktop-kit-selftest/selftest.md" ]; then say 0 "отчёт создан"; else say 1 "нет отчёта"; fi
+# Отчёт живёт ТОЛЬКО внутри архива: каталог рядом больше не остаётся.
+if [ -e "$HOME/desktop-kit-selftest" ]; then say 1 "остался лишний каталог"; else say 0 "лишнего каталога нет"; fi
 if [ -f "$HOME/desktop-kit-selftest.tar.gz" ]; then say 0 "архив собран"; else say 1 "нет архива"; fi
-if grep -q 'OK   ' "$HOME/desktop-kit-selftest/selftest.md" 2>/dev/null; then say 0 "в отчёте есть результаты"; else say 1 "отчёт пуст"; fi
+if tar -xzOf "$HOME/desktop-kit-selftest.tar.gz" ./selftest.md 2>/dev/null | grep -q 'OK   '; then
+    say 0 "в отчёте внутри архива есть результаты"
+else
+    say 1 "отчёт в архиве пуст или не найден"
+fi
 
 echo
 echo "== лог =="
