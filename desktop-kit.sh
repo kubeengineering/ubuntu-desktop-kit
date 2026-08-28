@@ -141,6 +141,89 @@ confirm() {
 
 
 # =====================================================================
+#  Пресеты: именованные наборы параметров
+# =====================================================================
+#
+# Числа помнить незачем. `buttons thin` понятнее, чем
+# `buttons --size 46 34 --icon 20 --radius 0`, и делает то же самое.
+# Имена английские, потому что это часть команды.
+#
+# Таблица: команда|имя|аргументы|что это
+
+presets_table() {
+    cat <<'EOF'
+buttons|thin|--size 46 34 --icon 20 --radius 0|large and thin, square highlight
+buttons|default|--size 32 32 --icon 16 --radius 999|as GNOME ships them
+buttons|big|--size 52 38 --icon 24 --radius 0|even larger, for high resolution
+buttons|square|--radius 0|square highlight, sizes untouched
+buttons|round|--radius 999|round highlight, sizes untouched
+buttons|keep|--glyphs keep --hover none|leave glyph and background to the theme
+corners|sharp|--radius 0|sharp, like Tabby and Windows
+corners|soft|--radius 6|barely rounded
+corners|round|--radius 12|rounded, GNOME default
+corners|extra|--radius 20|heavily rounded
+widget|dark|--colour 1e1e2e --text ffffff|dark backdrop, light text
+widget|light|--colour f2f2f2 --text 1e1e2e|light backdrop, dark text
+widget|flat|--radius 0|sharp corners
+widget|round|--radius 12|rounded corners
+widget|glass|--opacity 120|semi transparent backdrop
+widget|solid|--opacity 255|opaque backdrop
+terminal|opaque|--opacity 0|no transparency
+terminal|glass|--opacity 15|slightly see-through
+terminal|clear|--opacity 30|noticeably see-through
+newtab|big|--clock 140 --tile 150|large clock and tiles
+newtab|compact|--clock 80 --tile 110|small clock and tiles
+EOF
+}
+
+# Аргументы пресета. Пусто, если такого нет.
+preset_args() {
+    local cmd="$1"
+    local name="$2"
+    presets_table | awk -F'|' -v c="$cmd" -v n="$name" \
+        '$1 == c && $2 == n { print $3 }'
+}
+
+# Имена пресетов команды одной строкой — для общего списка команд
+presets_names() {
+    presets_table | awk -F'|' -v c="$1" '$1 == c { printf "%s ", $2 }'
+}
+
+# Список пресетов команды для справки
+presets_list() {
+    local cmd="$1"
+    presets_table | awk -F'|' -v c="$cmd" \
+        '$1 == c { printf "  %-9s %s\n", $2, $4 }'
+}
+
+# Развернуть первый аргумент, если это имя пресета. Вызывается в начале
+# команды: `buttons thin --icon 22` превращается в полный набор флагов,
+# и явные флаги после имени всё так же перекрывают пресет.
+preset_expand() {
+    PRESET_ARGS=""
+    PRESET_USED=""
+    local cmd="$1"
+    local first="${2:-}"
+    if [ -z "$first" ]; then
+        return 1
+    fi
+    case "$first" in
+        -*) return 1 ;;
+    esac
+    local args
+    args=$(preset_args "$cmd" "$first")
+    if [ -z "$args" ]; then
+        return 1
+    fi
+    PRESET_ARGS="$args"
+    PRESET_USED="$first"
+    return 0
+}
+
+PRESET_ARGS=""
+PRESET_USED=""
+
+# =====================================================================
 #  Вопросы пользователю
 # =====================================================================
 #
@@ -731,6 +814,14 @@ buttons — кнопки заголовка: размер, значки, под�
   --glyphs fluent|keep  откуда брать значки, по умолчанию fluent
   --diagnose            разобрать, почему значков не видно
 
+  ГОТОВЫЕ НАБОРЫ (имя вместо флагов):
+    desktop-kit buttons thin
+EOF
+    presets_list buttons
+    cat <<'EOF'
+
+  Флаги после имени набора перекрывают его: buttons thin --icon 24.
+
   Значки Fluent ставятся темой-наследником: текущая тема иконок
   наследуется целиком, подменяются ровно четыре значка. Папки и
   приложения остаются прежними.
@@ -887,6 +978,11 @@ buttons_args() {
 }
 
 cmd_buttons() {
+    if preset_expand buttons "${1:-}"; then
+        shift
+        set -- $PRESET_ARGS "$@"
+        note "набор '$PRESET_USED': $PRESET_ARGS"
+    fi
     local btn_w=46
     local btn_h=34
     local btn_icon=20
@@ -1289,6 +1385,10 @@ help_corners() {
 corners — скругление углов окон, меню и подсказок
 
   desktop-kit corners [--radius N]
+  desktop-kit corners ИМЯ-НАБОРА
+EOF
+    presets_list corners
+    cat <<'EOF' 
 
   --radius N    радиус в пикселях, по умолчанию 0 (строго прямые углы)
 
@@ -1723,7 +1823,12 @@ cmd_refresh() {
 }
 
 cmd_corners() {
-    radius=0
+    if preset_expand corners "${1:-}"; then
+        shift
+        set -- $PRESET_ARGS "$@"
+        note "набор '$PRESET_USED': $PRESET_ARGS"
+    fi
+    local radius=0
     while [ $# -gt 0 ]; do
         case "$1" in
             --radius) need_args "--radius" 2 "$#"; radius="${2:-0}"; shift 2 ;;
@@ -3065,6 +3170,11 @@ EOF
 }
 
 cmd_widget() {
+    if preset_expand widget "${1:-}"; then
+        shift
+        set -- $PRESET_ARGS "$@"
+        note "набор '$PRESET_USED': $PRESET_ARGS"
+    fi
     local radius=12
     local opacity=""
     local colour=""
@@ -3282,6 +3392,11 @@ term_profile() {
 }
 
 cmd_terminal() {
+    if preset_expand terminal "${1:-}"; then
+        shift
+        set -- $PRESET_ARGS "$@"
+        note "набор '$PRESET_USED': $PRESET_ARGS"
+    fi
     local opacity=""
     local font=""
     local palette=""
@@ -3452,6 +3567,11 @@ EOF
 }
 
 cmd_newtab() {
+    if preset_expand newtab "${1:-}"; then
+        shift
+        set -- $PRESET_ARGS "$@"
+        note "набор '$PRESET_USED': $PRESET_ARGS"
+    fi
     local action="rebuild"
     value=""
     local clock=110
@@ -6388,7 +6508,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report presets help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -7518,6 +7638,43 @@ st_report() {
     sandbox_drop
 }
 
+st_presets() {
+    t_group "наборы: имя вместо флагов"
+    sandbox_new
+
+    sandbox_run buttons thin --glyphs keep
+    t_rc "набор thin отработал" 0
+    t_has "размер из набора применился" "$SB/.config/gtk-4.0/gtk.css" "min-width: 46px"
+    t_out_has "сказано, какой набор развернулся" "набор 'thin'"
+
+    sandbox_run buttons default --glyphs keep
+    t_has "набор default даёт другой размер" "$SB/.config/gtk-4.0/gtk.css" "min-width: 32px"
+
+    # Флаг после имени набора должен перекрывать его значение
+    sandbox_run buttons thin --icon 26 --glyphs keep
+    t_has "флаг после набора перекрыл его" "$SB/.config/gtk-4.0/gtk.css" "-gtk-icon-size: 26px"
+
+    sandbox_run corners sharp
+    t_has "corners sharp даёт прямые углы" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 0px"
+    sandbox_run corners round
+    t_has "corners round даёт скругление" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 12px"
+
+    sandbox_run widget light
+    t_has "widget light ставит тёмный текст" "$SB/.config/conky/main.conf" "default_color = '1e1e2e'"
+
+    # Имя, которого нет, не должно молча проглатываться
+    sandbox_run buttons нетакогонабора
+    t_rc_not "неизвестное имя набора отвергается"
+
+    # Наборы обязаны быть видны там, где человек их будет искать
+    sandbox_run help buttons
+    t_out_has "наборы перечислены в справке команды" "thin"
+    sandbox_run help corners
+    t_out_has "и у corners тоже" "sharp"
+
+    sandbox_drop
+}
+
 st_help() {
     t_group "справка: покрытие всех команд"
     sandbox_new
@@ -7582,17 +7739,26 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
 ВНЕШНИЙ ВИД
   tune         настроить вопросами: показывает варианты и спрашивает
   buttons      кнопки заголовка: размер, значки, подсветка
+                 $(presets_names buttons)
   corners      скругление углов окон
+                 $(presets_names corners)
   refresh      вернуть свои правила, если их снесла установка темы
   theme        тема оформления, цветовая схема
   themes       банк готовых тем: список и установка
   icons        тема значков, цвет папок
   font         шрифт интерфейса и моноширинный
   widget       виджет conky: скругление, цвет, плотность
+                 $(presets_names widget)
   terminal     GNOME Terminal: прозрачность, шрифт, палитра
+                 $(presets_names terminal)
+
+  Слово после команды — готовый набор параметров: buttons thin,
+  corners sharp. Флаги после него перекрывают: buttons thin --icon 24.
+  Что делает каждый набор: $0 help buttons
 
 СОДЕРЖИМОЕ
   newtab       страница новой вкладки Chrome и её ярлыки
+                 $(presets_names newtab)
   wallpapers   банк обоев: пополнение, расписание, чистка
   wall         сменить обои: следующие, предыдущие, случайные
   serve        отдать локальную апку по http://localhost
