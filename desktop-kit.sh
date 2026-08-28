@@ -139,6 +139,152 @@ confirm() {
     return 1
 }
 
+
+# =====================================================================
+#  Вопросы пользователю
+# =====================================================================
+#
+# Команды с флагами хороши, когда знаешь, какие флаги бывают. Здесь
+# наоборот: скрипт показывает, что сейчас стоит, какие есть варианты,
+# и спрашивает. Ответ пустой означает «оставить как есть» — поэтому
+# можно проходить мастер, нажимая Enter, и ничего не сломается.
+
+ASK_ANSWER=""
+
+# Есть ли кому отвечать. Без терминала спрашивать нельзя: read повиснет.
+ask_possible() {
+    # DK_ASK_FORCE=1 нужен самопроверке: она подаёт ответы из файла и
+    # терминала у неё нет, а логику мастера проверить надо.
+    if [ "${DK_ASK_FORCE:-0}" = "1" ]; then
+        return 0
+    fi
+    if [ ! -t 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+ask_head() {
+    echo
+    echo "  == $1"
+    if [ -n "${2:-}" ]; then
+        echo "     $2"
+    fi
+}
+
+# Число в диапазоне. ask_num "что" "сейчас" мин макс "пояснение"
+ask_num() {
+    local what="$1"
+    local now="$2"
+    local lo="$3"
+    local hi="$4"
+    local hint="${5:-}"
+    local answer
+    ASK_ANSWER="$now"
+    while true; do
+        if [ -n "$hint" ]; then
+            echo "     $hint"
+        fi
+        printf '     %s [%s..%s, сейчас %s]: ' "$what" "$lo" "$hi" "$now"
+        read -r answer
+        if [ -z "$answer" ]; then
+            ASK_ANSWER="$now"
+            return 0
+        fi
+        if ! is_number "$answer"; then
+            echo "     нужно целое число"
+            continue
+        fi
+        if [ "$answer" -lt "$lo" ]; then
+            echo "     меньше $lo нельзя"
+            continue
+        fi
+        if [ "$answer" -gt "$hi" ]; then
+            echo "     больше $hi нельзя"
+            continue
+        fi
+        ASK_ANSWER="$answer"
+        return 0
+    done
+}
+
+# Выбор из списка. Варианты передаются парами: значение и подпись.
+# ask_pick "что" "сейчас" "0" "острые углы" "12" "скруглённые"
+ask_pick() {
+    local what="$1"
+    local now="$2"
+    shift 2
+    local vals=""
+    local i=0
+    local v
+    local label
+    echo "     $what"
+    while [ $# -gt 1 ]; do
+        v="$1"
+        label="$2"
+        shift 2
+        i=$((i + 1))
+        vals="$vals$v
+"
+        if [ "$v" = "$now" ]; then
+            printf '       %s) %-22s %s  (сейчас)\n' "$i" "$v" "$label"
+        else
+            printf '       %s) %-22s %s\n' "$i" "$v" "$label"
+        fi
+    done
+    local answer
+    ASK_ANSWER="$now"
+    while true; do
+        printf '     номер или своё значение [Enter — оставить %s]: ' "$now"
+        read -r answer
+        if [ -z "$answer" ]; then
+            ASK_ANSWER="$now"
+            return 0
+        fi
+        if is_number "$answer"; then
+            if [ "$answer" -ge 1 ]; then
+                if [ "$answer" -le "$i" ]; then
+                    ASK_ANSWER=$(printf '%s' "$vals" | sed -n "${answer}p")
+                    return 0
+                fi
+            fi
+        fi
+        # не номер из списка — принимаем как есть, это может быть свой цвет
+        ASK_ANSWER="$answer"
+        return 0
+    done
+}
+
+# Свободная строка
+ask_str() {
+    local what="$1"
+    local now="${2:-}"
+    local answer
+    if [ -n "$now" ]; then
+        printf '     %s [сейчас %s]: ' "$what" "$now"
+    else
+        printf '     %s: ' "$what"
+    fi
+    read -r answer
+    if [ -z "$answer" ]; then
+        ASK_ANSWER="$now"
+    else
+        ASK_ANSWER="$answer"
+    fi
+    return 0
+}
+
+ask_yes() {
+    local what="$1"
+    local answer
+    printf '     %s [y/N]: ' "$what"
+    read -r answer
+    if [ "$answer" = "y" ]; then
+        return 0
+    fi
+    return 1
+}
+
 # в режиме проверки ничего не пишем, только рассказываем
 would() {
     if [ "$DRY_RUN" = "1" ]; then
@@ -1131,6 +1277,354 @@ corners — скругление углов окон, меню и подсказ
   поэтому правится через css. В bspwm то же самое делает picom своим
   corner-radius, но в GNOME такого рычага нет.
 EOF
+}
+
+# =====================================================================
+#  tune — настройка вопросами
+# =====================================================================
+
+help_tune() {
+    cat <<'EOF'
+tune — настроить, отвечая на вопросы
+
+  desktop-kit tune             пройти по всем разделам
+  desktop-kit tune РАЗДЕЛ      только один раздел
+
+  Разделы: corners buttons widget newtab terminal theme font
+
+  Отличие от обычных команд: ничего не применяется молча. По каждой
+  настройке видно, что стоит сейчас, какие есть варианты и что каждый
+  из них значит. Пустой ответ оставляет как есть, так что можно пройти
+  весь мастер на Enter и ничего не изменить.
+
+  В конце раздела показывается команда с флагами, которая делает то же
+  самое — чтобы в следующий раз можно было без вопросов.
+EOF
+}
+
+# Показать, какой командой можно повторить сделанное без вопросов
+tune_recap() {
+    blank
+    note "то же самое одной командой:"
+    note "  $0 $*"
+}
+
+cmd_tune() {
+    local part="${1:-all}"
+    case "$part" in
+        -h|--help) help_tune; return 0 ;;
+    esac
+
+    # Имя раздела проверяем ДО терминала: на опечатку надо отвечать
+    # списком разделов, а не рассказом про отсутствие ввода.
+    case "$part" in
+        all|corners|buttons|widget|newtab|terminal|theme|font) : ;;
+        *)
+            bad "нет раздела '$part'"
+            note "есть: corners buttons widget newtab terminal theme font"
+            return 1
+            ;;
+    esac
+
+    if ! ask_possible; then
+        bad "нечем спрашивать: нет терминала"
+        note "запусти вручную, без перенаправления ввода"
+        return 1
+    fi
+
+    case "$part" in
+        all)
+            head1 "настройка вопросами"
+            note "пустой ответ = оставить как есть, можно жать Enter"
+            tune_corners
+            tune_buttons
+            tune_widget
+            tune_newtab
+            tune_terminal
+            blank
+            ok "готово"
+            note "посмотреть, что вышло: $0 status"
+            ;;
+        corners)  tune_corners ;;
+        buttons)  tune_buttons ;;
+        widget)   tune_widget ;;
+        newtab)   tune_newtab ;;
+        terminal) tune_terminal ;;
+        theme)    tune_theme ;;
+        font)     tune_font ;;
+    esac
+    return 0
+}
+
+# --------------------------------------------------------------- углы
+
+tune_corners() {
+    ask_head "Форма углов окон" "касается окон, меню и подсказок"
+
+    local now
+    now=$(state_get CORNERS_RADIUS)
+    if [ -z "$now" ]; then
+        now=0
+    fi
+
+    ask_pick "какие углы нужны?" "$now" \
+        0 "острые, как в Tabby и Windows" \
+        6 "едва скруглённые" \
+        12 "заметно скруглённые, как в GNOME по умолчанию" \
+        20 "сильно скруглённые"
+    local radius="$ASK_ANSWER"
+
+    if ! is_number "$radius"; then
+        bad "радиус — целое число, пропускаю раздел"
+        return 1
+    fi
+
+    cmd_corners --radius "$radius"
+    state_set CORNERS_RADIUS "$radius"
+    tune_recap "corners --radius $radius"
+}
+
+# ------------------------------------------------------------- кнопки
+
+tune_buttons() {
+    ask_head "Кнопки заголовка" "крестик, свернуть, развернуть"
+
+    local w
+    local h
+    local ic
+    local rad
+    local close
+    w=$(state_get BTN_W)
+    h=$(state_get BTN_H)
+    ic=$(state_get BTN_ICON)
+    rad=$(state_get BTN_RADIUS)
+    close=$(state_get BTN_CLOSE)
+    if [ -z "$w" ]; then w=46; fi
+    if [ -z "$h" ]; then h=34; fi
+    if [ -z "$ic" ]; then ic=20; fi
+    if [ -z "$rad" ]; then rad=0; fi
+    if [ -z "$close" ]; then close="#e81123"; fi
+
+    ask_num "ширина кнопки" "$w" 20 80
+    w="$ASK_ANSWER"
+    ask_num "высота кнопки" "$h" 16 60
+    h="$ASK_ANSWER"
+    ask_num "размер значка" "$ic" 10 40 "в GTK4; в GTK3 значок растягивается и выше 26 пикселит"
+    ic="$ASK_ANSWER"
+
+    ask_pick "форма подсветки под курсором" "$rad" \
+        0 "квадрат" \
+        4 "чуть скруглённый квадрат" \
+        999 "круг"
+    rad="$ASK_ANSWER"
+
+    ask_pick "цвет кнопки закрытия" "$close" \
+        "#e81123" "красный, как в Windows" \
+        "#c42b1c" "приглушённый красный" \
+        "none" "не красить, оставить теме"
+    close="$ASK_ANSWER"
+
+    local args="--size $w $h --icon $ic --radius $rad"
+    if [ "$close" != "none" ]; then
+        args="$args --close $close"
+    fi
+
+    blank
+    if ask_yes "тема сама рисует кнопки (WhiteSur и подобные)?"; then
+        args="$args --glyphs keep --hover none"
+        note "тогда меняем только размеры, остальное отдаём теме"
+    fi
+
+    cmd_buttons $args
+    state_set BTN_W "$w"
+    state_set BTN_H "$h"
+    state_set BTN_ICON "$ic"
+    state_set BTN_RADIUS "$rad"
+    state_set BTN_CLOSE "$close"
+    tune_recap "buttons $args"
+}
+
+# ------------------------------------------------------------- виджет
+
+tune_widget() {
+    if [ ! -f "$CONKY_CONF" ]; then
+        note "конфига conky нет, раздел пропускаю"
+        return 0
+    fi
+
+    ask_head "Виджет на рабочем столе" "conky: подложка и текст"
+
+    local colour
+    local ink
+    local alpha
+    local radius
+    colour=$(conf_value own_window_colour "$CONKY_CONF")
+    ink=$(conf_value default_color "$CONKY_CONF")
+    alpha=$(state_get CONKY_ALPHA)
+    radius=$(state_get CONKY_RADIUS)
+    if [ -z "$colour" ]; then colour="1e1e2e"; fi
+    if [ -z "$ink" ]; then ink="ffffff"; fi
+    if [ -z "$alpha" ]; then alpha=225; fi
+    if [ -z "$radius" ]; then radius=12; fi
+
+    ask_pick "форма подложки" "$radius" \
+        0 "прямые углы" \
+        12 "скруглённые" \
+        24 "сильно скруглённые"
+    radius="$ASK_ANSWER"
+
+    ask_num "плотность подложки" "$alpha" 0 255 "0 — насквозь прозрачная, 255 — сплошная"
+    alpha="$ASK_ANSWER"
+
+    ask_pick "цвет подложки" "$colour" \
+        "1e1e2e" "тёмный, под тёмную тему" \
+        "f2f2f2" "светлый, под светлую тему" \
+        "000000" "чёрный"
+    colour="$ASK_ANSWER"
+
+    ask_pick "цвет текста" "$ink" \
+        "ffffff" "белый, для тёмной подложки" \
+        "1e1e2e" "тёмный, для светлой подложки"
+    ink="$ASK_ANSWER"
+
+    local args="--radius $radius --opacity $alpha --colour $colour --text $ink"
+    cmd_widget $args
+    state_set CONKY_RADIUS "$radius"
+    tune_recap "widget $args"
+
+    blank
+    note "что показывает виджет — это его конфиг: $CONKY_CONF"
+    note "секция conky.text внизу файла, каждая строка — одна строка виджета"
+    if ask_yes "показать, из чего он сейчас состоит?"; then
+        blank
+        sed -n '/conky.text/,$p' "$CONKY_CONF" | head -25 | dump
+        blank
+        note "полезные переменные conky:"
+        note "  \${time %H:%M}         часы"
+        note "  \${cpu}%               загрузка процессора"
+        note "  \${memperc}%           память"
+        note "  \${fs_used_perc /}%    диск"
+        note "  \${downspeedf wlp0s20f3}  скорость приёма"
+        note "  \${execi 600 команда}  вывод своей команды раз в 600 секунд"
+        note "правится обычным редактором, потом: pkill conky; conky -c $CONKY_CONF &"
+    fi
+}
+
+# ------------------------------------------------- страница новой вкладки
+
+tune_newtab() {
+    ask_head "Страница новой вкладки" "часы, ярлыки, фон"
+
+    local n=0
+    if [ -f "$NEWTAB_LINKS" ]; then
+        n=$(grep -c '|' "$NEWTAB_LINKS" 2>/dev/null)
+    fi
+    note "сейчас ярлыков: $n"
+
+    while true; do
+        blank
+        if ! ask_yes "добавить ярлык?"; then
+            break
+        fi
+        ask_str "название (коротко, до 22 знаков)"
+        local nm="$ASK_ANSWER"
+        if [ -z "$nm" ]; then
+            note "без названия пропускаю"
+            continue
+        fi
+        ask_str "адрес (можно без https://)"
+        local url="$ASK_ANSWER"
+        if [ -z "$url" ]; then
+            note "без адреса пропускаю"
+            continue
+        fi
+        case "$url" in
+            http://*|https://*|file://*) : ;;
+            *) url="https://$url" ;;
+        esac
+        cmd_newtab --add "$nm|$url"
+    done
+
+    if [ "$n" -gt 0 ]; then
+        blank
+        if ask_yes "убрать какой-нибудь ярлык?"; then
+            cmd_newtab --list
+            ask_str "название, которое убрать"
+            if [ -n "$ASK_ANSWER" ]; then
+                cmd_newtab --remove "$ASK_ANSWER"
+            fi
+        fi
+    fi
+
+    blank
+    local clock
+    local tile
+    clock=$(state_get NEWTAB_CLOCK)
+    tile=$(state_get NEWTAB_TILE)
+    if [ -z "$clock" ]; then clock=110; fi
+    if [ -z "$tile" ]; then tile=130; fi
+    ask_num "размер часов" "$clock" 40 260
+    clock="$ASK_ANSWER"
+    ask_num "ширина плитки ярлыка" "$tile" 80 220
+    tile="$ASK_ANSWER"
+
+    cmd_newtab --clock "$clock" --tile "$tile"
+    state_set NEWTAB_CLOCK "$clock"
+    state_set NEWTAB_TILE "$tile"
+    tune_recap "newtab --clock $clock --tile $tile"
+}
+
+# ----------------------------------------------------------- терминал
+
+tune_terminal() {
+    ask_head "Терминал" "прозрачность и шрифт GNOME Terminal"
+
+    local prof
+    prof=$(term_profile)
+    if [ -z "$prof" ]; then
+        note "профиль GNOME Terminal не найден, раздел пропускаю"
+        return 0
+    fi
+
+    local op
+    op=$(gsettings get "$prof" background-transparency-percent 2>/dev/null)
+    if [ -z "$op" ]; then op=0; fi
+
+    ask_num "прозрачность фона" "$op" 0 100 "0 — непрозрачный, 30 уже заметно"
+    local newop="$ASK_ANSWER"
+
+    local args="--opacity $newop"
+    blank
+    if ask_yes "взять цвета из текущих обоев (pywal)?"; then
+        args="$args --palette wal"
+    fi
+
+    cmd_terminal $args
+    tune_recap "terminal $args"
+}
+
+# --------------------------------------------------------------- тема
+
+tune_theme() {
+    ask_head "Тема оформления" "список установленных"
+    list_themes | dump
+    blank
+    ask_str "имя темы (Enter — не менять)"
+    if [ -n "$ASK_ANSWER" ]; then
+        cmd_theme "$ASK_ANSWER"
+        tune_recap "theme $ASK_ANSWER"
+    fi
+}
+
+# -------------------------------------------------------------- шрифт
+
+tune_font() {
+    ask_head "Шрифт интерфейса" "сейчас: $(gi_get font-name)"
+    ask_str "шрифт и размер, например Cantarell 11"
+    if [ -n "$ASK_ANSWER" ]; then
+        cmd_font "$ASK_ANSWER"
+        tune_recap "font \"$ASK_ANSWER\""
+    fi
 }
 
 help_refresh() {
@@ -5822,7 +6316,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -6805,6 +7299,67 @@ window { background: blue; }
     sandbox_drop
 }
 
+st_tune() {
+    t_group "tune: настройка вопросами"
+    sandbox_new
+
+    # Без терминала мастер обязан отказаться, а не повиснуть на read
+    sandbox_run tune corners
+    t_rc_not "без терминала мастер отказывается"
+    t_out_has "объяснено, почему" "нет терминала"
+
+    # Дальше подаём ответы, притворившись терминалом
+    tune_run() {
+        printf '%s' "$1" | env -i             HOME="$SB" USER="${USER:-tester}"             PATH="$SB_BIN:/usr/local/bin:/usr/bin:/bin"             LANG="${LANG:-C.UTF-8}" TERM="${TERM:-dumb}"             DK_STUB_STORE="$SB_STORE" DK_ASK_FORCE=1             XDG_CONFIG_HOME="$SB/.config" XDG_DATA_HOME="$SB/.local/share"             XDG_STATE_HOME="$SB/.local/state" XDG_CACHE_HOME="$SB/.cache"             DK_SYS_THEMES="$SB/sys/themes" DK_SYS_ICONS="$SB/sys/icons"             DK_SYS_APPS="$SB/sys/applications"             bash "$SELF" "$2" "$3" > "$SB_OUT" 2>&1
+        SB_RC=$?
+    }
+
+    # выбор по номеру: третий вариант — радиус 12
+    tune_run '3
+' tune corners
+    t_has "выбранный радиус применился" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 12px"
+    t_out_has "показана команда-эквивалент" "corners --radius 12"
+
+    # пустой ответ ничего не меняет
+    tune_run '
+' tune corners
+    t_has "пустой ответ оставил как было" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 12px"
+
+    # своё значение вместо номера
+    tune_run '7
+' tune corners
+    t_has "принято своё значение" "$SB/.config/gtk-4.0/gtk.css" "border-radius: 7px"
+
+    # кнопки: ширина, высота, значок, форма, цвет, вопрос про тему
+    tune_run '50
+
+22
+1
+2
+n
+' tune buttons
+    t_has "ширина кнопки из ответа" "$SB/.config/gtk-4.0/gtk.css" "min-width: 50px"
+    t_has "высота осталась прежней" "$SB/.config/gtk-4.0/gtk.css" "min-height: 34px"
+    t_has "цвет закрытия из списка" "$SB/.config/gtk-4.0/gtk.css" "c42b1c"
+    t_out_has "команда-эквивалент для кнопок" "buttons --size 50 34"
+
+    # ответ «тема рисует сама» переводит в минимальный режим
+    tune_run '46
+34
+20
+1
+1
+y
+' tune buttons
+    t_hasnt "в минимальном режиме фон не трогается"         "$SB/.config/gtk-4.0/gtk.css" "background-image: none"
+
+    sandbox_run tune нетакого
+    t_rc_not "неизвестный раздел отвергается"
+    t_out_has "перечислены разделы" "corners"
+
+    sandbox_drop
+}
+
 st_help() {
     t_group "справка: покрытие всех команд"
     sandbox_new
@@ -6867,6 +7422,7 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   $0 <команда> [параметры]
 
 ВНЕШНИЙ ВИД
+  tune         настроить вопросами: показывает варианты и спрашивает
   buttons      кнопки заголовка: размер, значки, подсветка
   corners      скругление углов окон
   refresh      вернуть свои правила, если их снесла установка темы
@@ -7011,6 +7567,7 @@ cmd_help() {
         app)        help_app ;;
         themes)     help_themes ;;
         refresh)    help_refresh ;;
+        tune)       help_tune ;;
         keys)       help_keys ;;
         panel)      help_panel ;;
         serve)      help_serve ;;
@@ -7083,6 +7640,7 @@ case "$COMMAND" in
     serve)      cmd_serve "$@" ;;
     themes)     cmd_themes "$@" ;;
     refresh)    cmd_refresh "$@" ;;
+    tune)       cmd_tune "$@" ;;
     keys)       cmd_keys "$@" ;;
     panel)      cmd_panel "$@" ;;
     audit)      cmd_audit "$@" ;;
