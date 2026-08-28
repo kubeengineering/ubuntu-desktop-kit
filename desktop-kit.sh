@@ -2975,14 +2975,27 @@ install_theme() {
     fi
     require_tools git sassc
 
-    local variant="dark"
-    case "$name" in
-        *-Light|*-light) variant="light" ;;
+    # Вариант собираем ТОЛЬКО если он назван в имени. Просто "Graphite"
+    # означает «поставь тему», и ставить одну тёмную половину нельзя:
+    # установщики вендора без ключа -c кладут и светлую, и тёмную, а
+    # с ключом — ровно одну, после чего theme --light отказывается
+    # работать, потому что пары на диске нет. На этом уже обожглись.
+    local variant=""
+    case "$(theme_variant_of "$name")" in
+        light) variant="light" ;;
+        dark)  variant="dark" ;;
     esac
 
     head1 "сборка темы $name"
-    if would "склонировать $repo и собрать вариант $variant"; then
-        return 0
+    if [ -n "$variant" ]; then
+        if would "склонировать $repo и собрать вариант $variant"; then
+            return 0
+        fi
+    else
+        note "вариант не указан — соберу и светлый, и тёмный"
+        if would "склонировать $repo и собрать все варианты"; then
+            return 0
+        fi
     fi
 
     before=$(list_themes)
@@ -2996,7 +3009,11 @@ install_theme() {
         die "в репозитории нет install.sh — смотри $LOG_FILE"
     fi
 
-    ( cd "$src"; ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
+    if [ -n "$variant" ]; then
+        ( cd "$src"; ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
+    else
+        ( cd "$src"; ./install.sh >>"$LOG_FILE" 2>&1 )
+    fi
 
     if theme_exists "$name"; then
         ok "тема собрана: $name"
