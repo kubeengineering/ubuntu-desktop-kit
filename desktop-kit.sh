@@ -263,6 +263,89 @@ overview_terminal() {
 }
 
 # =====================================================================
+#  Тема для GTK4-приложений
+# =====================================================================
+#
+# libadwaita игнорирует темы GTK принципиально: Nautilus, Настройки и
+# прочие новые приложения остаются стандартными, как бы ни менялась
+# gtk-theme. Отсюда вечный вопрос «почему всё поменялось, а файловый
+# менеджер нет».
+#
+# Единственный работающий путь — правила в ~/.config/gtk-4.0/gtk.css.
+# Установщики вендоров делают этот файл симлинком внутрь темы, и тогда
+# наши блоки уезжают в каталог темы и пропадают при её пересборке.
+# Поэтому мы не симлинкуем, а ПОДКЛЮЧАЕМ тему одной строкой @import —
+# файл остаётся нашим, тема применяется, кнопки и углы живут рядом.
+
+GTK4_IMPORT_MARK="dk:gtk4-theme"
+
+# Путь к файлу темы для GTK4, если он у неё есть
+theme_gtk4_css() {
+    local name="$1"
+    local d
+    for d in "$HOME/.themes/$name" "$HOME/.local/share/themes/$name" \
+             "$SYS_THEMES/$name"; do
+        if [ -f "$d/gtk-4.0/gtk.css" ]; then
+            printf '%s\n' "$d/gtk-4.0/gtk.css"
+            return 0
+        fi
+    done
+    return 1
+}
+
+# Снять прежний импорт темы, оставив всё остальное
+gtk4_theme_unlink() {
+    if [ ! -f "$CSS4" ]; then
+        return 0
+    fi
+    if ! grep -q "$GTK4_IMPORT_MARK" "$CSS4"; then
+        return 1
+    fi
+    local tmp
+    tmp=$(mktemp)
+    sed "/$GTK4_IMPORT_MARK/,+1d" "$CSS4" > "$tmp"
+    mv "$tmp" "$CSS4"
+    return 0
+}
+
+# Подключить тему к GTK4-приложениям
+gtk4_theme_apply() {
+    local name="$1"
+    local css
+    css=$(theme_gtk4_css "$name")
+    if [ -z "$css" ]; then
+        note "у темы '$name' нет файла для GTK4 — новым приложениям её не показать"
+        note "они останутся стандартными, это ограничение libadwaita"
+        gtk4_theme_unlink
+        return 1
+    fi
+
+    if would "подключить тему '$name' к GTK4-приложениям"; then
+        return 0
+    fi
+
+    untangle_gtk4
+    backup_once "$CSS4" "gtk-4.0-gtk.css"
+    gtk4_theme_unlink
+
+    # Импорт должен идти ПЕРВЫМ: по правилам CSS @import обязан стоять
+    # до любых правил, иначе он молча игнорируется. Поэтому дописываем
+    # его в начало файла, а не в конец.
+    local tmp
+    tmp=$(mktemp)
+    printf '/* %s */\n@import url("file://%s");\n' "$GTK4_IMPORT_MARK" "$css" > "$tmp"
+    if [ -f "$CSS4" ]; then
+        cat "$CSS4" >> "$tmp"
+    fi
+    mv "$tmp" "$CSS4"
+    chmod 644 "$CSS4" 2>/dev/null
+
+    ok "тема подключена к GTK4-приложениям (файловый менеджер, Настройки)"
+    note "перезапусти их, чтобы увидеть: nautilus -q"
+    return 0
+}
+
+# =====================================================================
 #  Пресеты: именованные наборы параметров
 # =====================================================================
 #
@@ -2043,6 +2126,15 @@ theme — тема оформления окон
   desktop-kit theme --light       ТЕКУЩАЯ тема, но светлая
   desktop-kit theme --dark        ТЕКУЩАЯ тема, но тёмная
   desktop-kit theme --light --scheme-only   только схема, тему не трогать
+  desktop-kit theme ИМЯ --gtk4    показать тему и новым приложениям
+  desktop-kit theme ИМЯ --no-gtk4 отключить её от новых приложений
+
+  Про --gtk4. Файловый менеджер, Настройки и прочие новые приложения
+  написаны на libadwaita, а он темы GTK игнорирует — поэтому меняешь
+  тему, а они остаются стандартными. Флаг подключает файл темы для GTK4
+  строкой @import в ~/.config/gtk-4.0/gtk.css: наши кнопки и углы при
+  этом остаются на месте. Работает только если у темы есть каталог
+  gtk-4.0; у стоковых Adwaita и Yaru его нет.
 
   Про --light без имени темы: скрипт сам находит парный вариант той темы,
   что стоит сейчас — Graphite-Dark становится Graphite-Light, Yaru-dark
@@ -2749,6 +2841,7 @@ cmd_theme() {
     local only_list=0
     local scheme_only=0
     local head_done=0
+    local gtk4_mode=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
@@ -2757,6 +2850,8 @@ cmd_theme() {
             --dark)    scheme="prefer-dark"; shift ;;
             --light)   scheme="prefer-light"; shift ;;
             --scheme-only) scheme_only=1; shift ;;
+            --gtk4)        gtk4_mode="on"; shift ;;
+            --no-gtk4)     gtk4_mode="off"; shift ;;
             -h|--help) help_theme; return 0 ;;
             -*) die "theme: неизвестный параметр $1" ;;
             *) wanted="$1"; shift ;;
@@ -2934,6 +3029,27 @@ cmd_theme() {
         remember COLOR_SCHEME "$(gi_get color-scheme)"
         gi_set color-scheme "$scheme"
         ok "цветовая схема: $scheme"
+    fi
+
+    # GTK4-приложения темы не видят, пока её не подключить импортом
+    if [ -n "$wanted" ]; then
+        if [ "$gtk4_mode" = "on" ]; then
+            gtk4_theme_apply "$wanted"
+        fi
+        if [ "$gtk4_mode" = "off" ]; then
+            if gtk4_theme_unlink; then
+                ok "тема отключена от GTK4-приложений"
+            fi
+        fi
+        # Тема уже была подключена раньше — обновляем на новую молча
+        if [ -z "$gtk4_mode" ]; then
+            if [ -f "$CSS4" ]; then
+                if grep -q "$GTK4_IMPORT_MARK" "$CSS4" 2>/dev/null; then
+                    gtk4_theme_apply "$wanted" >/dev/null
+                    note "тема GTK4-приложений обновлена вместе с основной"
+                fi
+            fi
+        fi
     fi
 
     # Что за темой НЕ идёт: человек должен узнать это здесь, а не потом
@@ -5336,6 +5452,7 @@ cmd_revert() {
             ok "тема оболочки: $shell_theme"
         fi
 
+        gtk4_theme_unlink >/dev/null 2>&1
         revert_terminal
         revert_panel
         revert_app
@@ -5404,6 +5521,7 @@ cmd_revert() {
             fi
             ;;
         theme)
+            gtk4_theme_unlink >/dev/null 2>&1
             # Только оформление окон. Значки и шрифт — свои подкоманды:
             # человек, откатывающий тему, не просил трогать остальное.
             revert_gi_keys "GTK_THEME:gtk-theme" "COLOR_SCHEME:color-scheme"
@@ -7137,6 +7255,32 @@ st_theme() {
     if [ "$vbad" = "0" ]; then
         t_ok "имена тем разбираются верно (8 форм)"
     fi
+
+    # Тема для GTK4-приложений подключается импортом, а не симлинком:
+    # libadwaita темы игнорирует, и это единственный способ показать её
+    # файловому менеджеру, не потеряв наши кнопки.
+    mkdir -p "$SB/.themes/Graphite-Dark/gtk-4.0"
+    printf '/* тема для gtk4 */
+' > "$SB/.themes/Graphite-Dark/gtk-4.0/gtk.css"
+    sandbox_run buttons thin --glyphs keep
+    sandbox_run theme Graphite-Dark --gtk4
+    t_has "импорт темы добавлен" "$SB/.config/gtk-4.0/gtk.css" "@import"
+    t_has "импорт помечен нашим маркером" "$SB/.config/gtk-4.0/gtk.css" "dk:gtk4-theme"
+    t_has "наши кнопки при этом уцелели" "$SB/.config/gtk-4.0/gtk.css" "dk:buttons-begin"
+    # @import обязан идти ПЕРВЫМ, иначе CSS его молча игнорирует
+    if [ "$(grep -n '@import' "$SB/.config/gtk-4.0/gtk.css" | head -1 | cut -d: -f1)" -le 2 ]; then
+        t_ok "импорт стоит в начале файла"
+    else
+        t_fail "импорт не в начале — CSS его проигнорирует"
+    fi
+
+    sandbox_run theme Graphite-Dark --no-gtk4
+    t_hasnt "импорт снят по --no-gtk4" "$SB/.config/gtk-4.0/gtk.css" "@import"
+    t_has "кнопки после отключения на месте" "$SB/.config/gtk-4.0/gtk.css" "dk:buttons-begin"
+
+    # У темы без каталога gtk-4.0 подключать нечего — надо сказать честно
+    sandbox_run theme Loner-Dark --gtk4
+    t_out_has "сказано, что у темы нет файла для GTK4" "нет файла для GTK4"
 
     # Краевые имена не должны валить разбор: пустое приходит, когда
     # gsettings молчит, а одно слово-вариант — это тема с именем "Dark".
