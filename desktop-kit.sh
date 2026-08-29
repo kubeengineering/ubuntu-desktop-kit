@@ -280,15 +280,23 @@ icons_bank() {
 Papirus|PapirusDevelopmentTeam/papirus-icon-theme|8000|классика с цветными папками, самая полная
 WhiteSur|vinceliuice/WhiteSur-icon-theme|2040|в духе macOS, мягкие формы
 Tela|vinceliuice/Tela-icon-theme|1860|плоские и сочные, много расцветок
+Flat-Remix|daniruiz/flat-remix|1760|насыщенный material, 36 расцветок (исходники ~1 ГБ)
 Candy|EliverLara/Candy-icons|1310|яркие конфетные градиенты
 Colloid|vinceliuice/Colloid-icon-theme|1150|аккуратные, в стиле Material
+MoreWaita|somepaulo/MoreWaita|1080|дорисованная Adwaita: строго, но живо
+Tela-circle|vinceliuice/Tela-circle-icon-theme|935|круглые Tela, любимы в rice-сборках
 kora|bikass/kora|930|тонкие линии, минимализм
 Qogir|vinceliuice/Qogir-icon-theme|930|спокойные, ближе к GNOME
 Numix-Circle|numixproject/numix-icon-theme-circle|930|круглые, контрастные
 Fluent|vinceliuice/Fluent-icon-theme|860|в духе Windows 11
 Gruvbox-Plus|SylEleuth/gruvbox-plus-icon-pack|760|тёплая палитра gruvbox
 Reversal|yeyushengfan258/Reversal-icon-theme|710|плоские с обводкой, необычные
+Zafiro|zayronxio/Zafiro-icons|460|светлый минимализм, тонкая графика
+Vimix|vinceliuice/Vimix-icon-theme|440|мягкий material, спокойные тона
+Nordzy|MolassesLover/Nordzy-icon|420|палитра Nord: приглушённые сине-серые
 Win11|yeyushengfan258/Win11-icon-theme|385|подражание Windows 11
+We10X|yeyushengfan258/We10X-icon-theme|275|цветные, с характером
+Dracula|m4thewz/dracula-icons|120|фиолетовая палитра Dracula
 EOF
 }
 
@@ -317,6 +325,58 @@ icons_bank_list() {
     note "поставить:  $0 icons --get Tela Candy"
     note "примерить:  $0 icons ИМЯ"
     note "вернуть:    $0 revert icons"
+
+    # Исходники остаются лежать ради быстрой переустановки, но у крупных
+    # наборов это сотни мегабайт — человек должен видеть, сколько занято.
+    local cache="$HOME/.cache/desktop-kit/icons"
+    if [ -d "$cache" ]; then
+        local size
+        size=$(du -sh "$cache" 2>/dev/null | cut -f1)
+        if [ -n "$size" ]; then
+            note "исходники наборов занимают $size, снести: $0 icons --clean"
+        fi
+    fi
+}
+
+# Убрать скачанные исходники. Установленные темы при этом остаются:
+# они лежат в ~/.local/share/icons и от кэша не зависят.
+icons_clean() {
+    local cache="$HOME/.cache/desktop-kit/icons"
+    head1 "чистка исходников"
+    if [ ! -d "$cache" ]; then
+        ok "чистить нечего"
+        return 0
+    fi
+    local size
+    size=$(du -sh "$cache" 2>/dev/null | cut -f1)
+    if would "удалить исходники наборов ($size)"; then
+        return 0
+    fi
+    rm -rf "$cache"
+    ok "освобождено $size"
+    note "установленные наборы остались, это были только исходники"
+    return 0
+}
+
+# Положить каталог темы в ~/.local/share/icons под правильным именем.
+#
+# Имя берём из index.theme, а не из каталога в репозитории: у Zafiro,
+# например, каталоги называются просто Dark и Light, и скопируй мы их
+# как есть — в списке тем появились бы «Dark» и «Light», по которым
+# уже не понять, что это вообще за набор.
+icons_copy_theme() {
+    local from="$1"
+    local tname
+    tname=$(awk -F= '/^Name=/ { print $2; exit }' "$from/index.theme" | tr -d '\r')
+    if [ -z "$tname" ]; then
+        tname=$(basename "$from")
+    fi
+    local dest="$HOME/.local/share/icons/$tname"
+    mkdir -p "$HOME/.local/share/icons"
+    rm -rf "$dest"
+    cp -r "$from" "$dest" 2>/dev/null
+    # Служебное из репозитория теме не нужно и весит немало
+    rm -rf "$dest/.git" "$dest/.github" "$dest/preview" "$dest/_dev" 2>/dev/null
 }
 
 icons_get() {
@@ -368,31 +428,24 @@ icons_get() {
         # остальных установщиков эта переменная просто не используется.
         if [ -x "$src/install.sh" ]; then
             ( cd "$src"; DESTDIR="$HOME/.local/share/icons" ./install.sh >>"$LOG_FILE" 2>&1 )
-        elif [ -f "$src/Makefile" ]; then
+        elif [ -f "$src/Makefile" ] && have make; then
             ( cd "$src"; make PREFIX="$HOME/.local" install >>"$LOG_FILE" 2>&1 )
         else
-            # Установщика нет — значит тема лежит в репозитории готовой.
+            # Установщика нет (или он есть, но это Makefile, а make в
+            # системе не стоит) — значит берём тему из репозитория руками.
             # Встречаются два расклада: несколько тем подкаталогами и одна
             # тема прямо в корне (тогда index.theme лежит рядом с .git).
-            mkdir -p "$HOME/.local/share/icons"
+            if [ -f "$src/Makefile" ]; then
+                note "make не установлен — копирую готовые каталоги темы"
+                note "полная сборка со всеми расцветками: sudo apt install -y make"
+            fi
             local d
             if [ -f "$src/index.theme" ]; then
-                # Имя каталога должно совпадать с Name из index.theme,
-                # иначе GNOME темы не увидит.
-                local tname
-                tname=$(awk -F= '/^Name=/ { print $2; exit }' "$src/index.theme")
-                if [ -z "$tname" ]; then
-                    tname=$(basename "$src")
-                fi
-                d="$HOME/.local/share/icons/$tname"
-                rm -rf "$d"
-                cp -r "$src" "$d" 2>/dev/null
-                # Служебное из репозитория теме не нужно и весит много
-                rm -rf "$d/.git" "$d/.github" "$d/preview" 2>/dev/null
+                icons_copy_theme "$src"
             else
                 for d in "$src"/*/; do
                     if [ -f "$d/index.theme" ]; then
-                        cp -r "$d" "$HOME/.local/share/icons/" 2>/dev/null
+                        icons_copy_theme "$d"
                     fi
                 done
             fi
@@ -414,7 +467,17 @@ icons_get() {
             fi
             note "набор уже стоял, обновлён"
         fi
-        ok "поставлено: $(printf '%s' "$appeared" | tr '\n' ' ')"
+        # Наборы вроде Flat-Remix дают три десятка расцветок сразу, и
+        # вываливать их одной строкой бессмысленно — не читается.
+        local n_new
+        n_new=$(printf '%s\n' "$appeared" | grep -c .)
+        if [ "$n_new" -gt 6 ]; then
+            ok "поставлено тем: $n_new"
+            note "например: $(printf '%s\n' "$appeared" | head -4 | tr '\n' ' ')…"
+            note "все имена: $0 icons --list"
+        else
+            ok "поставлено: $(printf '%s' "$appeared" | tr '\n' ' ')"
+        fi
         ok_n=$((ok_n + 1))
     done
 
@@ -3354,11 +3417,16 @@ icons — тема значков и цвет папок
   desktop-kit icons --list         список установленных
   desktop-kit icons --bank         готовые наборы, которые можно скачать
   desktop-kit icons --get ИМЯ      скачать и поставить набор из банка
+  desktop-kit icons --clean        снести скачанные исходники
 
   Наборы из банка собираются из исходников (нужен git) и ставятся в
   ~/.local/share/icons — системные каталоги не трогаются, sudo не нужен.
   Один набор обычно даёт несколько тем сразу (тёмную, светлую, цветные),
   поэтому после установки смотри полный список: icons --list.
+
+  Исходники остаются в ~/.cache/desktop-kit, чтобы переустановка была
+  быстрой. У крупных наборов это сотни мегабайт — сколько занято, видно
+  в конце --bank, а --clean всё удалит, не трогая установленные темы.
 
   Цвета папок: adwaita black blue bluegrey breeze brown cyan green grey
   indigo magenta nordic orange pink red teal violet white yaru yellow
@@ -3412,6 +3480,7 @@ cmd_icons() {
         case "$1" in
             --folders) need_args "--folders" 2 "$#"; folders="${2:-}"; shift 2 ;;
             --bank)    icons_bank_list; return 0 ;;
+            --clean)   icons_clean; return $? ;;
             --get)     need_args "--get" 2 "$#"; shift
                        local want=""
                        while [ $# -gt 0 ]; do
@@ -7654,6 +7723,16 @@ st_icons() {
     sandbox_run --dry-run icons --get Tela
     t_rc "проверочный прогон установки не падает" 0
     t_nofile "проверочный прогон ничего не скачал" "$SB/.cache/desktop-kit/icons"
+
+    sandbox_run icons --clean
+    t_rc "чистка на пустом месте не ругается" 0
+
+    # Чистка сносит исходники, но не установленные темы
+    mkdir -p "$SB/.cache/desktop-kit/icons/что-то"
+    sandbox_run icons --clean
+    t_nofile "исходники снесены" "$SB/.cache/desktop-kit/icons"
+    t_file "установленные темы чистка не тронула" \
+        "$SB/.local/share/icons/Papirus-Dark-dk-glyphs/index.theme"
 
     sandbox_drop
 }
