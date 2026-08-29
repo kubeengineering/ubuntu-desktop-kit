@@ -358,6 +358,37 @@ icons_clean() {
     return 0
 }
 
+# Хватит ли места под ещё один набор.
+#
+# Проверяем не только байты, но и иноды: наборы значков — это сотни
+# тысяч крохотных svg, и таблица инодов кончается заметно раньше места.
+# На этом уже обожглись: df показывал 20 свободных гигабайт, а git
+# писал «На устройстве не осталось свободного места» и обрывал клон.
+disk_room_warn() {
+    local free_i
+    local free_m
+    free_i=$(df -i --output=iavail "$HOME" 2>/dev/null | tail -1 | tr -d ' ')
+    free_m=$(df -m --output=avail "$HOME" 2>/dev/null | tail -1 | tr -d ' ')
+    case "$free_i" in
+        ''|*[!0-9]*) free_i="" ;;
+    esac
+    case "$free_m" in
+        ''|*[!0-9]*) free_m="" ;;
+    esac
+    if [ -n "$free_i" ] && [ "$free_i" -lt 300000 ]; then
+        bad "мало свободных инодов: $free_i"
+        note "набор значков — это сотни тысяч мелких файлов, может не влезть"
+        note "освободить: $0 icons --clean"
+        return 1
+    fi
+    if [ -n "$free_m" ] && [ "$free_m" -lt 2048 ]; then
+        bad "на диске меньше 2 ГБ свободного места"
+        note "освободить: $0 icons --clean"
+        return 1
+    fi
+    return 0
+}
+
 # Положить каталог темы в ~/.local/share/icons под правильным именем.
 #
 # Имя берём из index.theme, а не из каталога в репозитории: у Zafiro,
@@ -387,6 +418,11 @@ icons_get() {
     local bad_n=0
     head1 "установка значков"
     require_tools git
+    if ! disk_room_warn; then
+        if ! confirm "всё равно продолжить?"; then
+            return 1
+        fi
+    fi
 
     for nm in "$@"; do
         blank
@@ -2407,6 +2443,17 @@ theme_repo_for() {
         Magnetic*) echo "https://github.com/vinceliuice/Magnetic-gtk-theme.git" ;;
         Vimix*)    echo "https://github.com/vinceliuice/Vimix-gtk-themes.git" ;;
         Layan*)    echo "https://github.com/vinceliuice/Layan-gtk-theme.git" ;;
+        # Авторские: палитры, которые ценит rice-сообщество
+        Catppuccin*) echo "https://github.com/Fausto-Korpsvart/Catppuccin-GTK-Theme.git" ;;
+        Tokyonight*) echo "https://github.com/Fausto-Korpsvart/Tokyonight-GTK-Theme.git" ;;
+        Gruvbox*)    echo "https://github.com/Fausto-Korpsvart/Gruvbox-GTK-Theme.git" ;;
+        Everforest*) echo "https://github.com/Fausto-Korpsvart/Everforest-GTK-Theme.git" ;;
+        Rose-Pine*)  echo "https://github.com/Fausto-Korpsvart/Rose-Pine-GTK-Theme.git" ;;
+        Nordic*)     echo "https://github.com/EliverLara/Nordic.git" ;;
+        Sweet*)      echo "https://github.com/EliverLara/Sweet.git" ;;
+        Dracula*)    echo "https://github.com/dracula/gtk.git" ;;
+        Mono*)       echo "https://github.com/witalihirsch/Mono-gtk-theme.git" ;;
+        Flat-Remix*) echo "https://github.com/daniruiz/flat-remix-gtk.git" ;;
         *) echo "" ;;
     esac
 }
@@ -2465,6 +2512,16 @@ Win11|подражание Windows 11, отдельная от Fluent
 Orianin|современная тёмная с неоновым акцентом
 Magnetic|контрастная, крупная типографика
 Vimix|плоская с цветными акцентами, много расцветок
+Catppuccin|пастельная, четыре готовых настроения
+Tokyonight|тёмная сине-фиолетовая, как палитра Tokyo Night
+Gruvbox|тёплая ретро-палитра, мягкий контраст
+Everforest|приглушённая зелёная, спокойная для глаз
+Rose-Pine|розово-лиловая, приглушённая и тихая
+Nordic|холодная палитра Nord, очень аккуратная
+Sweet|тёмная с неоновыми акцентами
+Dracula|фиолетовая классика, узнаваемая
+Mono|монохромная, без единого цветного пятна
+Flat-Remix|плоская яркая, пара к одноимённым значкам
 EOF
 }
 
@@ -2530,6 +2587,11 @@ themes_install() {
     local bad_n=0
     head1 "установка тем"
     require_tools git sassc
+    if ! disk_room_warn; then
+        if ! confirm "всё равно продолжить?"; then
+            return 1
+        fi
+    fi
     # Установщики вендоров кладут тему в ~/.themes только если каталог уже
     # существует, иначе выбирают другой путь. Создаём заранее.
     mkdir -p "$HOME/.themes"
@@ -3307,6 +3369,91 @@ install_theme_check_symlink() {
     fi
 }
 
+# Собрать и поставить тему из склонированного репозитория.
+#
+# Раньше здесь просто звался ./install.sh — так устроены все темы
+# vinceliuice. Но авторские темы раскладывают себя иначе, и каждый
+# расклад приходится узнавать в лицо:
+#
+#   install.sh в корне        vinceliuice: Graphite, Orchis, Fluent…
+#   install.sh в themes/      Fausto-Korpsvart: Catppuccin, Gruvbox…
+#   Makefile                  Flat-Remix, rose-pine
+#   index.theme в корне       EliverLara Nordic, dracula/gtk
+#   каталоги с index.theme    Mono
+#
+# Порядок веток важен: сперва настоящие установщики, потом сборка, и
+# только в конце копирование готового каталога.
+theme_build() {
+    local src="$1"
+    local variant="$2"
+
+    if [ -x "$src/install.sh" ]; then
+        if [ -n "$variant" ]; then
+            ( cd "$src"; ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
+        else
+            ( cd "$src"; ./install.sh >>"$LOG_FILE" 2>&1 )
+        fi
+        return 0
+    fi
+
+    if [ -x "$src/themes/install.sh" ]; then
+        note "установщик лежит в themes/ — запускаю оттуда"
+        ( cd "$src/themes"; ./install.sh >>"$LOG_FILE" 2>&1 )
+        return 0
+    fi
+
+    if [ -f "$src/Makefile" ] && have make; then
+        ( cd "$src"; make PREFIX="$HOME/.local" install >>"$LOG_FILE" 2>&1 )
+        return 0
+    fi
+
+    mkdir -p "$HOME/.themes"
+    if [ -f "$src/index.theme" ]; then
+        note "тема лежит в репозитории готовой — копирую"
+        theme_copy_dir "$src"
+        return 0
+    fi
+
+    local d
+    local copied=0
+    for d in "$src"/*/; do
+        if [ -f "$d/index.theme" ]; then
+            theme_copy_dir "$d"
+            copied=1
+        fi
+    done
+    if [ "$copied" = "1" ]; then
+        note "темы взяты из репозитория готовыми"
+        return 0
+    fi
+
+    # Отдельный случай: собрать есть чем, но инструмента нет. Сказать
+    # «непонятно, как ставится» было бы неправдой — непонятного ничего.
+    if [ -f "$src/Makefile" ]; then
+        bad "тема собирается через make, а его в системе нет"
+        note "поставить: sudo apt install -y make"
+        return 1
+    fi
+
+    bad "непонятно, как ставится эта тема — ни установщика, ни index.theme"
+    note "подробности: $LOG_FILE"
+    return 1
+}
+
+# Скопировать каталог темы в ~/.themes под именем из index.theme
+theme_copy_dir() {
+    local from="$1"
+    local tname
+    tname=$(awk -F= '/^Name=/ { print $2; exit }' "$from/index.theme" | tr -d '\r')
+    if [ -z "$tname" ]; then
+        tname=$(basename "$from")
+    fi
+    local dest="$HOME/.themes/$tname"
+    rm -rf "$dest"
+    cp -r "$from" "$dest" 2>/dev/null
+    rm -rf "$dest/.git" "$dest/.github" "$dest/Art" "$dest/assets" 2>/dev/null
+}
+
 install_theme() {
     local name="$1"
     local repo
@@ -3350,15 +3497,7 @@ install_theme() {
         rm -rf "$src"
         git clone --depth 1 "$repo" "$src" >>"$LOG_FILE" 2>&1
     fi
-    if [ ! -x "$src/install.sh" ]; then
-        die "в репозитории нет install.sh — смотри $LOG_FILE"
-    fi
-
-    if [ -n "$variant" ]; then
-        ( cd "$src"; ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
-    else
-        ( cd "$src"; ./install.sh >>"$LOG_FILE" 2>&1 )
-    fi
+    theme_build "$src" "$variant"
 
     if theme_exists "$name"; then
         ok "тема собрана: $name"
