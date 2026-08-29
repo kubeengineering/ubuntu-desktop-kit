@@ -263,6 +263,172 @@ overview_terminal() {
 }
 
 # =====================================================================
+#  Банк тем значков
+# =====================================================================
+#
+# Стоковые Adwaita и Yaru выглядят пресно, а искать наборы по гитхабу
+# каждый раз лень. Здесь живые репозитории с числом звёзд на момент
+# добавления — все проверены на доступность и свежесть.
+#
+# Кнопки заголовка от этого не страдают: buttons строит своего
+# наследника поверх ЛЮБОЙ темы значков, подменяя ровно четыре глифа.
+#
+# имя|репозиторий|звёзды|описание
+
+icons_bank() {
+    cat <<'EOF'
+Papirus|PapirusDevelopmentTeam/papirus-icon-theme|8000|классика с цветными папками, самая полная
+WhiteSur|vinceliuice/WhiteSur-icon-theme|2040|в духе macOS, мягкие формы
+Tela|vinceliuice/Tela-icon-theme|1860|плоские и сочные, много расцветок
+Candy|EliverLara/Candy-icons|1310|яркие конфетные градиенты
+Colloid|vinceliuice/Colloid-icon-theme|1150|аккуратные, в стиле Material
+kora|bikass/kora|930|тонкие линии, минимализм
+Qogir|vinceliuice/Qogir-icon-theme|930|спокойные, ближе к GNOME
+Numix-Circle|numixproject/numix-icon-theme-circle|930|круглые, контрастные
+Fluent|vinceliuice/Fluent-icon-theme|860|в духе Windows 11
+Gruvbox-Plus|SylEleuth/gruvbox-plus-icon-pack|760|тёплая палитра gruvbox
+Reversal|yeyushengfan258/Reversal-icon-theme|710|плоские с обводкой, необычные
+Win11|yeyushengfan258/Win11-icon-theme|385|подражание Windows 11
+EOF
+}
+
+icons_repo_for() {
+    icons_bank | awk -F'|' -v n="$1" '$1 == n { print $2 }'
+}
+
+icons_bank_list() {
+    head1 "банк значков"
+    blank
+    local nm repo st desc mark
+    icons_bank | while IFS='|' read -r nm repo st desc; do
+        mark=""
+        if list_icon_themes | grep -q "^$nm"; then
+            mark="уже есть"
+        fi
+        # printf выравнивает по БАЙТАМ, а кириллица весит по два на букву,
+        # поэтому колонка после русского описания разъезжается. Ставим
+        # описание последним — выравнивать после него уже нечего.
+        if [ -n "$mark" ]; then
+            mark="  ($mark)"
+        fi
+        printf '  %-13s %5s *  %s%s\n' "$nm" "$st" "$desc" "$mark"
+    done
+    blank
+    note "поставить:  $0 icons --get Tela Candy"
+    note "примерить:  $0 icons ИМЯ"
+    note "вернуть:    $0 revert icons"
+}
+
+icons_get() {
+    local nm
+    local repo
+    local src
+    local ok_n=0
+    local bad_n=0
+    head1 "установка значков"
+    require_tools git
+
+    for nm in "$@"; do
+        blank
+        note "--- $nm ---"
+        repo=$(icons_repo_for "$nm")
+        if [ -z "$repo" ]; then
+            bad "набора '$nm' в банке нет"
+            note "список: $0 icons --bank"
+            bad_n=$((bad_n + 1))
+            continue
+        fi
+
+        if would "скачать и поставить набор $nm"; then
+            continue
+        fi
+
+        src="$HOME/.cache/desktop-kit/icons/$(basename "$repo")"
+        mkdir -p "$(dirname "$src")"
+        if [ ! -d "$src/.git" ]; then
+            rm -rf "$src"
+            if ! git clone --depth 1 "https://github.com/$repo.git" "$src" >>"$LOG_FILE" 2>&1; then
+                bad "не скачалось — смотри $LOG_FILE"
+                bad_n=$((bad_n + 1))
+                continue
+            fi
+        else
+            git -C "$src" pull -q >>"$LOG_FILE" 2>&1
+        fi
+
+        local before
+        before=$(list_user_icon_themes | grep -v -- '-dk-glyphs$')
+
+        mkdir -p "$HOME/.local/share/icons"
+
+        # Установщик обычно есть, но не каждый ставит туда, куда нам надо.
+        # Папирусовский, например, по умолчанию целится в /usr/share/icons
+        # и сам поднимает sudo — то есть переписывает системный набор.
+        # Нам это не нужно: DESTDIR уводит его в домашний каталог, а у
+        # остальных установщиков эта переменная просто не используется.
+        if [ -x "$src/install.sh" ]; then
+            ( cd "$src"; DESTDIR="$HOME/.local/share/icons" ./install.sh >>"$LOG_FILE" 2>&1 )
+        elif [ -f "$src/Makefile" ]; then
+            ( cd "$src"; make PREFIX="$HOME/.local" install >>"$LOG_FILE" 2>&1 )
+        else
+            # Установщика нет — значит тема лежит в репозитории готовой.
+            # Встречаются два расклада: несколько тем подкаталогами и одна
+            # тема прямо в корне (тогда index.theme лежит рядом с .git).
+            mkdir -p "$HOME/.local/share/icons"
+            local d
+            if [ -f "$src/index.theme" ]; then
+                # Имя каталога должно совпадать с Name из index.theme,
+                # иначе GNOME темы не увидит.
+                local tname
+                tname=$(awk -F= '/^Name=/ { print $2; exit }' "$src/index.theme")
+                if [ -z "$tname" ]; then
+                    tname=$(basename "$src")
+                fi
+                d="$HOME/.local/share/icons/$tname"
+                rm -rf "$d"
+                cp -r "$src" "$d" 2>/dev/null
+                # Служебное из репозитория теме не нужно и весит много
+                rm -rf "$d/.git" "$d/.github" "$d/preview" 2>/dev/null
+            else
+                for d in "$src"/*/; do
+                    if [ -f "$d/index.theme" ]; then
+                        cp -r "$d" "$HOME/.local/share/icons/" 2>/dev/null
+                    fi
+                done
+            fi
+        fi
+
+        local after
+        after=$(list_user_icon_themes | grep -v -- '-dk-glyphs$')
+        local appeared
+        appeared=$(comm -13 <(printf '%s\n' "$before") <(printf '%s\n' "$after"))
+        if [ -z "$appeared" ]; then
+            # Набор мог уже стоять — тогда он не «появился», а обновился,
+            # и ругаться не на что. Ошибка — только если его нет вовсе.
+            appeared=$(printf '%s\n' "$after" | grep -i "^$nm")
+            if [ -z "$appeared" ]; then
+                bad "после установки новых тем значков не появилось"
+                note "подробности: $LOG_FILE"
+                bad_n=$((bad_n + 1))
+                continue
+            fi
+            note "набор уже стоял, обновлён"
+        fi
+        ok "поставлено: $(printf '%s' "$appeared" | tr '\n' ' ')"
+        ok_n=$((ok_n + 1))
+    done
+
+    blank
+    ok "наборов поставлено: $ok_n, не вышло: $bad_n"
+    note "все имена: $0 icons --list"
+    note "примерить: $0 icons ИМЯ"
+    if [ "$bad_n" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+# =====================================================================
 #  Тема для GTK4-приложений
 # =====================================================================
 #
@@ -3185,7 +3351,14 @@ icons — тема значков и цвет папок
   desktop-kit icons                показать текущую и доступные
   desktop-kit icons ИМЯ            применить тему значков
   desktop-kit icons --folders ЦВЕТ перекрасить папки Papirus
-  desktop-kit icons --list         список доступных
+  desktop-kit icons --list         список установленных
+  desktop-kit icons --bank         готовые наборы, которые можно скачать
+  desktop-kit icons --get ИМЯ      скачать и поставить набор из банка
+
+  Наборы из банка собираются из исходников (нужен git) и ставятся в
+  ~/.local/share/icons — системные каталоги не трогаются, sudo не нужен.
+  Один набор обычно даёт несколько тем сразу (тёмную, светлую, цветные),
+  поэтому после установки смотри полный список: icons --list.
 
   Цвета папок: adwaita black blue bluegrey breeze brown cyan green grey
   indigo magenta nordic orange pink red teal violet white yaru yellow
@@ -3199,6 +3372,21 @@ icons — тема значков и цвет папок
   Смена темы значков не ломает кнопки заголовка: если активен наследник
   <база>-dk-glyphs от команды buttons, он пересобирается поверх новой темы.
 EOF
+}
+
+# Только то, что поставлено под пользователем. Нужно при установке из
+# банка: набор вроде Papirus часто уже есть в /usr/share из пакета, и по
+# общему списку не понять, добавилось ли что-то нашими руками.
+list_user_icon_themes() {
+    for d in "$HOME/.local/share/icons" "$HOME/.icons"; do
+        if [ -d "$d" ]; then
+            for t in "$d"/*; do
+                if [ -f "$t/index.theme" ]; then
+                    basename "$t"
+                fi
+            done
+        fi
+    done | sort -u
 }
 
 list_icon_themes() {
@@ -3223,6 +3411,18 @@ cmd_icons() {
     while [ $# -gt 0 ]; do
         case "$1" in
             --folders) need_args "--folders" 2 "$#"; folders="${2:-}"; shift 2 ;;
+            --bank)    icons_bank_list; return 0 ;;
+            --get)     need_args "--get" 2 "$#"; shift
+                       local want=""
+                       while [ $# -gt 0 ]; do
+                           case "$1" in
+                               -*) break ;;
+                               *) want="$want $1"; shift ;;
+                           esac
+                       done
+                       icons_get $want
+                       return $?
+                       ;;
             --list)    only_list=1; shift ;;
             -h|--help) help_icons; return 0 ;;
             -*) die "icons: неизвестный параметр $1" ;;
@@ -7426,6 +7626,35 @@ st_icons() {
     t_rc_not "перекраска не-Papirus отвергнута"
     t_out_has "объяснено почему" "Papirus"
 
+    # --- банк наборов ------------------------------------------------
+    # Сеть здесь не трогаем: проверяем таблицу и разбор аргументов.
+    # Что наборы действительно ставятся — проверено руками на живой
+    # системе, гонять двенадцать git clone на каждом прогоне незачем.
+    sandbox_run icons --bank
+    t_rc "список банка отработал" 0
+    t_out_has "в банке есть Tela" "Tela"
+    t_out_has "в банке есть Papirus" "Papirus"
+    t_out_has "сказано, как ставить" "--get"
+
+    local bad_rows
+    bad_rows=$(icons_bank | awk -F'|' 'NF != 4 || $2 !~ /\// || $1 == "" { print }')
+    t_eq "все строки банка заполнены" "" "$bad_rows"
+
+    local dups
+    dups=$(icons_bank | cut -d'|' -f1 | sort | uniq -d)
+    t_eq "имена в банке не повторяются" "" "$dups"
+
+    t_eq "репозиторий находится по имени" "bikass/kora" "$(icons_repo_for kora)"
+    t_eq "неизвестное имя репозитория не даёт" "" "$(icons_repo_for НетТакого)"
+
+    sandbox_run icons --get НетТакогоНабора
+    t_rc_not "неизвестный набор отвергнут"
+    t_out_has "подсказан список банка" "--bank"
+
+    sandbox_run --dry-run icons --get Tela
+    t_rc "проверочный прогон установки не падает" 0
+    t_nofile "проверочный прогон ничего не скачал" "$SB/.cache/desktop-kit/icons"
+
     sandbox_drop
 }
 
@@ -8203,6 +8432,7 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   theme        тема оформления, цветовая схема
   themes       банк готовых тем: список и установка
   icons        тема значков, цвет папок
+                 --bank: готовые наборы (Tela, Candy, Papirus, kora…)
   font         шрифт интерфейса и моноширинный
   widget       виджет conky: скругление, цвет, плотность
                  $(presets_names widget)
