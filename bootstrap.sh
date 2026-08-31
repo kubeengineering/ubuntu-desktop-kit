@@ -51,7 +51,19 @@ command -v apt-get >/dev/null || { echo "Это не Debian/Ubuntu"; exit 1; }
 export PATH="$HOME/.local/bin:$BIN:$PATH"
 SESSION="${XDG_SESSION_TYPE:-unknown}"
 
-sudo -v || exit 1
+# sudo нужен для пакетов. Если запускают не из терминала (по ssh в
+# фоне, из автозапуска), sudo не сможет спросить пароль и выдаст
+# «a terminal is required» — сообщение, по которому непонятно, что
+# делать. Объясняем сами.
+if ! sudo -n true 2>/dev/null; then
+    if [ ! -t 0 ]; then
+        echo "Нужен sudo, а спросить пароль негде: запуск без терминала."
+        echo "Запусти из обычного терминала, либо заранее выполни: sudo -v"
+        exit 1
+    fi
+    echo "Нужен пароль sudo — он потребуется только для установки пакетов."
+    sudo -v || exit 1
+fi
 ( while true; do sleep 50; sudo -n true 2>/dev/null || exit; done ) &
 SUDO_PID=$!
 trap 'kill "$SUDO_PID" 2>/dev/null' EXIT
