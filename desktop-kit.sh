@@ -263,6 +263,366 @@ overview_terminal() {
 }
 
 # =====================================================================
+#  profile — снимок оформления целиком
+# =====================================================================
+#
+# Подобрал тему, значки, шрифт, кнопки, обои — и всё это держится на
+# десятке ключей gsettings и паре файлов css. Дальше человек идёт
+# пробовать новое, что-то ломается, и вернуть прежний вид нечем:
+# revert умеет откатывать «как было до нас», а не «как было вчера».
+#
+# Профиль закрывает именно этот пробел: save запоминает текущий вид
+# целиком, load возвращает его. Темы и значки внутрь не копируются —
+# только имена: наборы весят гигабайты, а лежат отдельно и никуда не
+# денутся. Если тему всё же снесли, load честно об этом скажет.
+
+PROFILE_DIR="$STATE_DIR/profiles"
+
+# Ключи, из которых складывается внешний вид. Схема|ключ.
+# Схемы, которых в системе нет, молча пропускаются — расширения вроде
+# user-theme стоят не у всех.
+profile_keys() {
+    cat <<'EOF'
+org.gnome.desktop.interface|gtk-theme
+org.gnome.desktop.interface|icon-theme
+org.gnome.desktop.interface|cursor-theme
+org.gnome.desktop.interface|cursor-size
+org.gnome.desktop.interface|color-scheme
+org.gnome.desktop.interface|font-name
+org.gnome.desktop.interface|document-font-name
+org.gnome.desktop.interface|monospace-font-name
+org.gnome.desktop.interface|font-antialiasing
+org.gnome.desktop.interface|font-hinting
+org.gnome.desktop.interface|text-scaling-factor
+org.gnome.desktop.wm.preferences|theme
+org.gnome.desktop.wm.preferences|button-layout
+org.gnome.desktop.wm.preferences|titlebar-font
+org.gnome.desktop.background|picture-uri
+org.gnome.desktop.background|picture-uri-dark
+org.gnome.desktop.background|picture-options
+org.gnome.desktop.background|primary-color
+org.gnome.desktop.screensaver|picture-uri
+org.gnome.shell.extensions.user-theme|name
+EOF
+}
+
+# Файлы, которые тоже определяют вид. Путь|имя в снимке.
+profile_files() {
+    cat <<EOF
+$CSS3|gtk-3.0-gtk.css
+$CSS4|gtk-4.0-gtk.css
+$CONKY_CONF|conky-main.conf
+$CONKY_LUA|conky-bg.lua
+EOF
+}
+
+help_profile() {
+    cat <<'EOF'
+profile — сохранить нынешний вид и вернуться к нему потом
+
+  desktop-kit profile                 список снимков
+  desktop-kit profile save ИМЯ        запомнить, как всё выглядит сейчас
+  desktop-kit profile load ИМЯ        вернуть запомненный вид
+  desktop-kit profile show ИМЯ        что внутри снимка
+  desktop-kit profile drop ИМЯ        удалить снимок
+
+  Имя можно не писать: save назовёт снимок по дате, load возьмёт
+  последний сохранённый.
+
+  Что попадает в снимок: тема окон и цветовая схема, тема значков,
+  шрифты, курсор, раскладка кнопок заголовка, обои, а также файлы
+  gtk-3.0/gtk.css и gtk-4.0/gtk.css целиком — то есть наши кнопки,
+  углы и всё, что там лежит. Конфиг conky, если он есть.
+
+  Чего в снимке НЕТ: самих тем и наборов значков. Они весят гигабайты
+  и лежат отдельно, поэтому запоминаются только их имена. Если тему
+  потом снести, load про это скажет и оставит остальное.
+
+  Перед каждым load текущий вид сам сохраняется под именем before-load,
+  так что неудачную загрузку всегда можно отыграть назад.
+
+  Отличие от revert: revert возвращает «как было ДО нашего первого
+  вмешательства», profile — «как было в момент, который ты выбрал».
+EOF
+}
+
+# Имя снимка по дате — когда человек не назвал своё
+profile_autoname() {
+    date +%Y-%m-%d-%H%M
+}
+
+profile_list_names() {
+    if [ ! -d "$PROFILE_DIR" ]; then
+        return 0
+    fi
+    local d
+    for d in "$PROFILE_DIR"/*/; do
+        if [ -f "$d/settings.txt" ]; then
+            basename "$d"
+        fi
+    done
+}
+
+profile_save() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        name=$(profile_autoname)
+    fi
+    # Имя станет каталогом, поэтому слэши и точки в начале недопустимы
+    case "$name" in
+        */*|.*|"") die "profile: негодное имя снимка '$name'" ;;
+    esac
+
+    head1 "снимок оформления"
+    if would "сохранить нынешний вид под именем '$name'"; then
+        return 0
+    fi
+
+    local dest="$PROFILE_DIR/$name"
+    if [ -d "$dest" ]; then
+        note "снимок '$name' уже есть — перезаписываю"
+    fi
+    rm -rf "$dest"
+    mkdir -p "$dest/files"
+
+    # --- ключи ---
+    local schema key value saved=0
+    while IFS='|' read -r schema key; do
+        if [ -z "$schema" ]; then
+            continue
+        fi
+        value=$(gsettings get "$schema" "$key" 2>/dev/null)
+        if [ -z "$value" ]; then
+            continue
+        fi
+        printf '%s|%s|%s\n' "$schema" "$key" "$value" >> "$dest/settings.txt"
+        saved=$((saved + 1))
+    done <<EOF
+$(profile_keys)
+EOF
+
+    # --- файлы ---
+    local path as files=0
+    while IFS='|' read -r path as; do
+        if [ -z "$path" ]; then
+            continue
+        fi
+        if [ -f "$path" ]; then
+            cp "$path" "$dest/files/$as" 2>/dev/null
+            files=$((files + 1))
+        fi
+    done <<EOF
+$(profile_files)
+EOF
+
+    # --- состояние самого скрипта ---
+    # Без него после load откат работал бы от чужих значений: state.env
+    # помнит наши последние настройки, before.env — что было до нас.
+    if [ -d "$STATE_DIR" ]; then
+        cp "$STATE_DIR"/*.env "$dest/files/" 2>/dev/null
+    fi
+
+    printf 'снят: %s\nверсия: %s\n' "$(date '+%Y-%m-%d %H:%M')" "$VERSION" \
+        > "$dest/meta.txt"
+
+    ok "снимок '$name' сохранён"
+    note "ключей: $saved, файлов: $files"
+    note "вернуться сюда: $0 profile load $name"
+    return 0
+}
+
+profile_load() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        # Без имени берём самый свежий — это то, чего человек ждёт,
+        # когда говорит «верни как было».
+        name=$(profile_list_names | grep -v '^before-load$' | sort | tail -1)
+        if [ -z "$name" ]; then
+            bad "снимков нет"
+            note "сделать: $0 profile save"
+            return 1
+        fi
+        note "имя не названо — беру последний: $name"
+    fi
+
+    local src="$PROFILE_DIR/$name"
+    if [ ! -f "$src/settings.txt" ]; then
+        bad "снимка '$name' нет"
+        note "список: $0 profile"
+        return 1
+    fi
+
+    head1 "возврат к снимку $name"
+    if would "вернуть вид из снимка '$name'"; then
+        return 0
+    fi
+
+    # Страховка: прежде чем перетирать нынешний вид, запоминаем его.
+    if [ "$name" != "before-load" ]; then
+        profile_save "before-load" >/dev/null 2>&1
+        note "нынешний вид сохранён как before-load"
+    fi
+
+    local schema key value applied=0 missing=""
+    while IFS='|' read -r schema key value; do
+        if [ -z "$schema" ]; then
+            continue
+        fi
+        # Темы могло не остаться на диске — тогда gsettings примет имя,
+        # а система молча покажет стандартный вид. Предупреждаем.
+        case "$key" in
+            gtk-theme)
+                if ! theme_exists "$(printf '%s' "$value" | tr -d \"\')"; then
+                    missing="$missing тема:$(printf '%s' "$value" | tr -d \"\')"
+                fi
+                ;;
+            icon-theme)
+                if ! list_icon_themes | grep -qxF "$(printf '%s' "$value" | tr -d \"\')"; then
+                    missing="$missing значки:$(printf '%s' "$value" | tr -d \"\')"
+                fi
+                ;;
+        esac
+        if gsettings set "$schema" "$key" "$value" 2>/dev/null; then
+            applied=$((applied + 1))
+        fi
+    done < "$src/settings.txt"
+
+    local path as files=0
+    while IFS='|' read -r path as; do
+        if [ -z "$path" ]; then
+            continue
+        fi
+        if [ -f "$src/files/$as" ]; then
+            mkdir -p "$(dirname "$path")"
+            # Симлинк на месте css оставлять нельзя: запись пойдёт внутрь
+            # темы, а не в наш файл.
+            if [ -L "$path" ]; then
+                rm -f "$path"
+            fi
+            cp "$src/files/$as" "$path" 2>/dev/null
+            files=$((files + 1))
+        fi
+    done <<EOF
+$(profile_files)
+EOF
+
+    if [ -d "$STATE_DIR" ]; then
+        cp "$src/files"/*.env "$STATE_DIR/" 2>/dev/null
+    fi
+
+    ok "вид возвращён: ключей $applied, файлов $files"
+    if [ -n "$missing" ]; then
+        blank
+        bad "на диске больше нет:$missing"
+        note "имена вернулись, но выглядеть будет иначе"
+        note "поставить обратно: $0 themes --install ИМЯ  или  $0 icons --get ИМЯ"
+    fi
+    note "отыграть назад: $0 profile load before-load"
+    return 0
+}
+
+profile_show() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        die "profile show: назови снимок, например: $0 profile show $(profile_autoname)"
+    fi
+    local src="$PROFILE_DIR/$name"
+    if [ ! -f "$src/settings.txt" ]; then
+        bad "снимка '$name' нет"
+        return 1
+    fi
+    head1 "снимок $name"
+    if [ -f "$src/meta.txt" ]; then
+        sed 's/^/    /' "$src/meta.txt"
+    fi
+    blank
+    local schema key value
+    while IFS='|' read -r schema key value; do
+        if [ -z "$key" ]; then
+            continue
+        fi
+        printf '  %-22s %s\n' "$key" "$value"
+    done < "$src/settings.txt"
+    blank
+    note "файлы в снимке: $(ls "$src/files" 2>/dev/null | tr '\n' ' ')"
+    note "вернуть: $0 profile load $name"
+    return 0
+}
+
+profile_drop() {
+    local name="${1:-}"
+    if [ -z "$name" ]; then
+        die "profile drop: назови снимок"
+    fi
+    case "$name" in
+        */*|.*|"") die "profile: негодное имя снимка '$name'" ;;
+    esac
+    local src="$PROFILE_DIR/$name"
+    if [ ! -d "$src" ]; then
+        bad "снимка '$name' нет"
+        return 1
+    fi
+    if would "удалить снимок '$name'"; then
+        return 0
+    fi
+    rm -rf "$src"
+    ok "снимок '$name' удалён"
+    return 0
+}
+
+profile_list() {
+    head1 "снимки оформления"
+    local names
+    names=$(profile_list_names)
+    if [ -z "$names" ]; then
+        blank
+        note "снимков пока нет"
+        note "сохранить нынешний вид: $0 profile save дома"
+        return 0
+    fi
+    blank
+    local n when theme
+    for n in $names; do
+        when=$(sed -n 's/^снят: //p' "$PROFILE_DIR/$n/meta.txt" 2>/dev/null)
+        theme=$(awk -F'|' '$2 == "gtk-theme" { print $3 }' \
+                "$PROFILE_DIR/$n/settings.txt" 2>/dev/null | tr -d \"\')
+        printf '  %-20s %s   тема: %s\n' "$n" "${when:-—}" "${theme:-?}"
+    done
+    blank
+    note "вернуть: $0 profile load ИМЯ"
+    note "подробно: $0 profile show ИМЯ"
+}
+
+cmd_profile() {
+    local action="list"
+    local name=""
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            save|load|show|drop) action="$1"; shift
+                                 if [ $# -gt 0 ]; then
+                                     case "$1" in
+                                         -*) : ;;
+                                         *) name="$1"; shift ;;
+                                     esac
+                                 fi
+                                 ;;
+            --list)    action="list"; shift ;;
+            -h|--help) help_profile; return 0 ;;
+            -*) die "profile: неизвестный параметр $1" ;;
+            *)  die "profile: непонятно '$1' — нужно save, load, show или drop" ;;
+        esac
+    done
+
+    case "$action" in
+        list) profile_list ;;
+        save) profile_save "$name" ;;
+        load) profile_load "$name" ;;
+        show) profile_show "$name" ;;
+        drop) profile_drop "$name" ;;
+    esac
+}
+
+# =====================================================================
 #  Банк тем значков
 # =====================================================================
 #
@@ -358,6 +718,79 @@ icons_clean() {
     return 0
 }
 
+# Скачать репозиторий, переживая обрывы.
+#
+# Крупные репозитории тем то и дело рвутся на середине с
+# «RPC failed; curl 92 HTTP/2 stream was not closed cleanly» — это
+# известная беда HTTP/2 на длинных ответах, а не поломка сети:
+# git ls-remote в тот же момент отвечает мгновенно. Лечится
+# принудительным HTTP/1.1, поэтому вторая попытка идёт с ним.
+git_clone_retry() {
+    local repo="$1"
+    local dest="$2"
+
+    rm -rf "$dest"
+    if git clone --depth 1 "$repo" "$dest" >>"$LOG_FILE" 2>&1; then
+        return 0
+    fi
+
+    note "связь оборвалась — повторяю на HTTP/1.1"
+    rm -rf "$dest"
+    if git -c http.version=HTTP/1.1 clone --depth 1 "$repo" "$dest" \
+         >>"$LOG_FILE" 2>&1; then
+        return 0
+    fi
+
+    # Третий заход — архивом. На тяжёлых репозиториях (у палитр внутри
+    # лежат ещё и значки) git рвётся даже на HTTP/1.1: протокол тянет
+    # всё одним потоком и начинает заново после каждого обрыва. curl
+    # умеет докачку и повторы, а история нам не нужна вовсе — только
+    # рабочее дерево. Заодно выходит легче: без .git.
+    note "и так не вышло — тяну архивом"
+    rm -rf "$dest"
+
+    local slug
+    slug=$(printf '%s' "$repo" | sed 's#^https://github.com/##; s#\.git$##')
+    case "$slug" in
+        */*) : ;;
+        *) return 1 ;;
+    esac
+
+    local tmp
+    tmp=$(mktemp -d)
+    if ! curl -fL --retry 5 --retry-delay 2 --retry-all-errors --max-time 900 \
+           -o "$tmp/src.tar.gz" \
+           "https://codeload.github.com/$slug/tar.gz/HEAD" >>"$LOG_FILE" 2>&1; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    if ! tar xzf "$tmp/src.tar.gz" -C "$tmp" >>"$LOG_FILE" 2>&1; then
+        rm -rf "$tmp"
+        return 1
+    fi
+
+    # В архиве один каталог вида REPO-<ветка> — он и есть дерево
+    local inner
+    inner=$(find "$tmp" -mindepth 1 -maxdepth 1 -type d | head -1)
+    if [ -z "$inner" ]; then
+        rm -rf "$tmp"
+        return 1
+    fi
+    mkdir -p "$(dirname "$dest")"
+    mv "$inner" "$dest"
+    rm -rf "$tmp"
+
+    # Архив приезжает без прав на исполнение — установщик надо вернуть
+    # в рабочее состояние, иначе ветка «нет установщика» соврёт.
+    local f
+    for f in "$dest/install.sh" "$dest/themes/install.sh"; do
+        if [ -f "$f" ]; then
+            chmod +x "$f" 2>/dev/null
+        fi
+    done
+    return 0
+}
+
 # Хватит ли места под ещё один набор.
 #
 # Проверяем не только байты, но и иноды: наборы значков — это сотни
@@ -442,8 +875,7 @@ icons_get() {
         src="$HOME/.cache/desktop-kit/icons/$(basename "$repo")"
         mkdir -p "$(dirname "$src")"
         if [ ! -d "$src/.git" ]; then
-            rm -rf "$src"
-            if ! git clone --depth 1 "https://github.com/$repo.git" "$src" >>"$LOG_FILE" 2>&1; then
+            if ! git_clone_retry "https://github.com/$repo.git" "$src"; then
                 bad "не скачалось — смотри $LOG_FILE"
                 bad_n=$((bad_n + 1))
                 continue
@@ -2495,6 +2927,19 @@ themes — банк готовых тем оформления
   надо: он делает ~/.config/gtk-4.0/gtk.css симлинком внутрь темы, и наши
   правила уехали бы туда же.
 
+  Установщики запускаются в пакетном режиме: они только собирают тему и
+  не задают вопросов. Раньше палитры (Catppuccin, Gruvbox и прочие от
+  Fausto-Korpsvart) на середине спрашивали «Do you want to apply Vague?»
+  и ждали ответа, а при запуске из скрипта отвечать было некому — со
+  стороны это выглядело как зависание. Тот же режим запрещает им самим
+  применять тему и переделывать gtk-4.0/gtk.css в симлинк, так что
+  кнопки заголовка установку переживают. Если файл всё же пострадал,
+  скрипт скажет об этом сразу и предложит refresh.
+
+  Если связь с GitHub рвётся на середине (у крупных тем такое бывает),
+  скачивание повторяется на HTTP/1.1, а затем архивом через curl — он
+  умеет докачку.
+
   После установки посмотреть имена: desktop-kit theme --list
 EOF
 }
@@ -2633,6 +3078,13 @@ themes_install() {
             cmd_refresh
         else
             note "потом вручную: $0 refresh"
+        fi
+    else
+        # Молчание тут читается как «непонятно, цело ли». Раз человек
+        # каждый раз боится за свои кнопки — говорим прямо.
+        if [ -n "$(state_get BTN_ARGS)" ]; then
+            blank
+            ok "кнопки заголовка на месте — установка их не тронула"
         fi
     fi
 
@@ -3387,18 +3839,23 @@ theme_build() {
     local src="$1"
     local variant="$2"
 
+    # BATCH_MODE — не косметика, а защита. Без него установщики
+    # Fausto-Korpsvart сначала задают вопросы (и висят, потому что
+    # отвечать некому), а потом сами применяют тему и переделывают
+    # ~/.config/gtk-4.0/gtk.css в симлинк внутрь темы — вместе с
+    # нашими кнопками и углами. С ним они только собирают.
     if [ -x "$src/install.sh" ]; then
         if [ -n "$variant" ]; then
-            ( cd "$src"; ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
+            ( cd "$src"; BATCH_MODE=true ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
         else
-            ( cd "$src"; ./install.sh >>"$LOG_FILE" 2>&1 )
+            ( cd "$src"; BATCH_MODE=true ./install.sh >>"$LOG_FILE" 2>&1 )
         fi
         return 0
     fi
 
     if [ -x "$src/themes/install.sh" ]; then
         note "установщик лежит в themes/ — запускаю оттуда"
-        ( cd "$src/themes"; ./install.sh >>"$LOG_FILE" 2>&1 )
+        ( cd "$src/themes"; BATCH_MODE=true ./install.sh >>"$LOG_FILE" 2>&1 )
         return 0
     fi
 
@@ -3495,7 +3952,16 @@ install_theme() {
     mkdir -p "$(dirname "$src")"
     if [ ! -d "$src/.git" ]; then
         rm -rf "$src"
-        git clone --depth 1 "$repo" "$src" >>"$LOG_FILE" 2>&1
+        # Код возврата тут обязателен. Оборванный клон оставляет
+        # каталог без установщика, и без этой проверки человек
+        # получал «непонятно, как ставится эта тема» вместо честного
+        # «не скачалось» — и шёл искать ошибку не там.
+        if ! git_clone_retry "$repo" "$src"; then
+            bad "не удалось скачать тему — оборвалась связь с GitHub"
+            note "попробуй ещё раз: $0 themes --install $name"
+            note "подробности: $LOG_FILE"
+            return 1
+        fi
     fi
     theme_build "$src" "$variant"
 
@@ -7301,7 +7767,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes refresh tune report presets overview help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes profile refresh tune report presets overview help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -8322,6 +8788,81 @@ st_themes() {
 
 # ------------------------------------------------- согласованность справки
 
+st_profile() {
+    t_group "profile: снимки оформления"
+    sandbox_new
+
+    sandbox_run profile
+    t_rc "пустой список не падает" 0
+    t_out_has "подсказано, как сохранить" "profile save"
+
+    # Задаём узнаваемое состояние и снимаем его
+    sb_set org.gnome.desktop.interface gtk-theme "Graphite-Dark"
+    sb_set org.gnome.desktop.interface icon-theme "Papirus"
+    sb_set org.gnome.desktop.interface color-scheme "prefer-dark"
+    sandbox_run buttons default
+    local css_before
+    css_before=$(md5sum "$SB/.config/gtk-3.0/gtk.css" | cut -d' ' -f1)
+
+    sandbox_run profile save дома
+    t_rc "снимок сохранён" 0
+    t_file "файл ключей создан" "$SB/.local/state/desktop-kit/profiles/дома/settings.txt"
+    t_file "css попал в снимок"         "$SB/.local/state/desktop-kit/profiles/дома/files/gtk-3.0-gtk.css"
+
+    sandbox_run profile
+    t_out_has "снимок виден в списке" "дома"
+
+    sandbox_run profile show дома
+    t_rc "показ снимка работает" 0
+    t_out_has "в снимке записана тема" "Graphite-Dark"
+
+    # Ломаем всё и возвращаемся
+    sb_set org.gnome.desktop.interface gtk-theme "Yaru"
+    sb_set org.gnome.desktop.interface icon-theme "Adwaita"
+    sb_set org.gnome.desktop.interface color-scheme "default"
+    printf 'мусор
+' > "$SB/.config/gtk-3.0/gtk.css"
+
+    sandbox_run profile load дома
+    t_rc "снимок загружен" 0
+    t_eq "тема вернулась" "Graphite-Dark"         "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    # Ожидаем наследника, а не Papirus: buttons подменяет тему значков
+    # своей производной, и она — такая же часть вида, как всё прочее.
+    t_eq "значки вернулись вместе с наследником кнопок" "Papirus-dk-glyphs"         "$(sb_get org.gnome.desktop.interface icon-theme)"
+    t_eq "схема вернулась" "prefer-dark"         "$(sb_get org.gnome.desktop.interface color-scheme)"
+    t_eq "css восстановлен побайтно" "$css_before"         "$(md5sum "$SB/.config/gtk-3.0/gtk.css" | cut -d' ' -f1)"
+    t_file "страховочный снимок создан"         "$SB/.local/state/desktop-kit/profiles/before-load/settings.txt"
+
+    # Страховка должна помнить именно то, что было перед загрузкой
+    sandbox_run profile load before-load
+    t_eq "отыгрыш назад возвращает испорченное" "Yaru"         "$(sb_get org.gnome.desktop.interface gtk-theme)"
+
+    # Пропавшая тема: имя вернём, но честно предупредим
+    sandbox_run profile load дома
+    rm -rf "$SB/.themes/Graphite-Dark" "$SB/.local/share/themes/Graphite-Dark"
+    sandbox_run profile save безтемы
+    rm -rf "$SB/.themes/Graphite-Dark"
+    sandbox_run profile load безтемы
+    t_out_has "про пропавшую тему сказано" "больше нет"
+
+    sandbox_run profile load НетТакого
+    t_rc_not "несуществующий снимок отвергнут"
+    t_out_has "подсказан список" "profile"
+
+    sandbox_run profile save "плохое/имя"
+    t_rc_not "имя со слэшем отвергнуто"
+
+    sandbox_run --dry-run profile save проверка
+    t_rc "проверочный прогон не падает" 0
+    t_nofile "проверочный прогон снимок не создал"         "$SB/.local/state/desktop-kit/profiles/проверка"
+
+    sandbox_run profile drop дома
+    t_rc "снимок удалён" 0
+    t_nofile "каталог снимка исчез" "$SB/.local/state/desktop-kit/profiles/дома"
+
+    sandbox_drop
+}
+
 st_refresh() {
     t_group "refresh: возврат своих правил"
     sandbox_new
@@ -8672,6 +9213,7 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   keys         горячие клавиши
   panel        панель задач: прозрачность, высота
   app          своя тема для одного приложения
+  profile      сохранить нынешний вид целиком и вернуться к нему потом
   audit        полный снимок системы в markdown
   status       что сейчас применено
   selftest     проверить себя на этой машине и собрать архив
@@ -8795,6 +9337,7 @@ cmd_help() {
         wall)       help_wall ;;
         app)        help_app ;;
         themes)     help_themes ;;
+        profile)    help_profile ;;
         refresh)    help_refresh ;;
         tune)       help_tune ;;
         keys)       help_keys ;;
@@ -8868,6 +9411,7 @@ case "$COMMAND" in
     app)        cmd_app "$@" ;;
     serve)      cmd_serve "$@" ;;
     themes)     cmd_themes "$@" ;;
+    profile)    cmd_profile "$@" ;;
     refresh)    cmd_refresh "$@" ;;
     tune)       cmd_tune "$@" ;;
     keys)       cmd_keys "$@" ;;
