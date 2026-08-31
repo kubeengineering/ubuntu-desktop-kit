@@ -283,9 +283,9 @@ overview_terminal() {
 
 look_table() {
     cat <<'EOF'
-work|тёмный рабочий стол: стеклянная панель, виджет справа, прозрачный терминал|theme Graphite-Dark --gtk4|icons Papirus-Dark|buttons default|corners --radius 12|panel --opacity 20 --size 46|widget --colour 1e1e2e --text ffffff --radius 12 --opacity 225|terminal --opacity 12
-night|то же, но темнее и строже: острые углы, глухая подложка|theme Graphite-Dark --gtk4|icons Papirus-Dark|buttons thin|corners --radius 0|panel --opacity 40 --size 42|widget --colour 11111b --text cdd6f4 --radius 0 --opacity 255|terminal --opacity 6
-paper|светлый день: мягкие углы, светлый виджет, непрозрачный терминал|theme Graphite-Light --gtk4|icons Papirus-Light|buttons default|corners --radius 10|panel --opacity 15 --size 44|widget --colour f2f2f2 --text 1e1e2e --radius 12 --opacity 235|terminal --opacity 0
+work|тёмный рабочий стол: стеклянная панель, виджет справа, прозрачный терминал|theme Graphite-Dark --gtk4|icons Papirus-Dark|buttons default|corners --radius 12|panel --float --opacity 15 --size 46|widget --init|widget --colour 1e1e2e --text ffffff --radius 12 --opacity 225|terminal --opacity 12
+night|то же, но темнее и строже: острые углы, глухая подложка|theme Graphite-Dark --gtk4|icons Papirus-Dark|buttons thin|corners --radius 0|panel --float --opacity 35 --size 42|widget --init|widget --colour 11111b --text cdd6f4 --radius 0 --opacity 255|terminal --opacity 6
+paper|светлый день: мягкие углы, светлый виджет, непрозрачный терминал|theme Graphite-Light --gtk4|icons Papirus-Light|buttons default|corners --radius 10|panel --float --opacity 12 --size 44|widget --init|widget --colour f2f2f2 --text 1e1e2e --radius 12 --opacity 235|terminal --opacity 0
 EOF
 }
 
@@ -4483,6 +4483,8 @@ widget — виджет conky на рабочем столе
   --dark         тёмная подложка со светлым текстом
   --square       без скругления (то же, что --radius 0)
   --modules      список готовых блоков для виджета
+  --init         создать виджет с нуля, если конфига conky ещё нет
+  --city ГОРОД   город для погоды (по умолчанию Moscow)
   --add ИМЯ      добавить блок в виджет: cpu mem disk net uptime load temp
 
   Про --light: при переходе системы на светлую тему conky за ней НЕ идёт.
@@ -4498,6 +4500,54 @@ EOF
 
 # Готовые строки для виджета. Добавляются в конец conky.text —
 # не нужно искать файл и вспоминать переменные conky.
+# Скрипт, который приносит погоду в виджет.
+#
+# Conky сам ходить в сеть не умеет, поэтому строку готовит отдельная
+# команда, а виджет лишь зовёт её раз в 15 минут. Город спрашиваем
+# один раз и запоминаем: wttr.in определяет его по IP, а с VPN это
+# даёт погоду не того города, чего человек не ждёт.
+weather_line_path() {
+    printf '%s\n' "$HOME/bin/weather-line"
+}
+
+weather_line_install() {
+    local city="${1:-}"
+    local path
+    path=$(weather_line_path)
+
+    if [ -z "$city" ]; then
+        city=$(state_get WEATHER_CITY)
+    fi
+    if [ -z "$city" ]; then
+        city="Moscow"
+        note "город не указан — беру Moscow"
+        note "поменять: $0 widget --city Санкт-Петербург"
+    fi
+
+    mkdir -p "$(dirname "$path")"
+    cat > "$path" <<'WEOF'
+#!/bin/bash
+# Строка погоды для виджета conky. Город можно передать аргументом.
+CITY="${1:-@CITY@}"
+curl -sf "https://wttr.in/$CITY?format=%t++%C&lang=ru" --max-time 5
+echo
+curl -sf "https://wttr.in/$CITY?format=Ветер+%w++Влажность+%h&lang=ru" --max-time 5
+WEOF
+    sed -i "s|@CITY@|$city|" "$path"
+    chmod +x "$path"
+    state_set WEATHER_CITY "$city"
+    ok "погода: $city ($path)"
+
+    # ~/bin попадает в PATH из ~/.profile, но только если каталог
+    # существовал на момент входа. Виджет зовёт скрипт по полному
+    # пути, так что ему всё равно, а человеку — нет.
+    case ":$PATH:" in
+        *":$HOME/bin:"*) : ;;
+        *) note "каталог ~/bin в PATH появится после следующего входа" ;;
+    esac
+    return 0
+}
+
 widget_modules_table() {
     cat <<'EOF'
 cpu|Процессор: ${cpu}% ${cpubar 6}|загрузка процессора с полосой
@@ -4507,6 +4557,7 @@ net|Сеть: v ${downspeedf wlp0s20f3}  ^ ${upspeedf wlp0s20f3}|скорост�
 uptime|Аптайм: ${uptime_short}|время работы с включения
 load|LA: ${loadavg}|средняя нагрузка
 temp|Температура: ${acpitemp}C|температура по ACPI
+weather|${color1}ПОГОДА${color}\n${execi 900 ~/bin/weather-line}|погода из wttr.in, обновление раз в 15 минут
 EOF
 }
 
@@ -4527,7 +4578,7 @@ widget_add_module() {
         bad "в конфиге нет секции conky.text — добавить некуда"
         return 1
     fi
-    if grep -qF -- "$line" "$CONKY_CONF"; then
+    if grep -qF -- "$(printf '%b' "$line" | head -1)" "$CONKY_CONF"; then
         note "такая строка уже есть — второй раз не добавляю"
         return 0
     fi
@@ -4535,22 +4586,118 @@ widget_add_module() {
         return 0
     fi
     backup_once "$CONKY_CONF" "conky-main.conf"
+    # Блок может быть многострочным (у погоды это заголовок и вызов
+    # скрипта). В таблице перенос записан двумя символами, обратной
+    # косой и n, потому что строка там одна; здесь разворачиваем.
+    local block
+    block=$(printf '%b' "$line")
+    local first
+    first=$(printf '%s' "$block" | head -1)
     # conky.text = [[ ... ]] — вставляем перед закрывающей скобкой
     local tmp
     tmp=$(mktemp)
-    awk -v add="$line" '
+    awk -v add="$block" '
         /^\]\]/ && !done { print add; done=1 }
         { print }
     ' "$CONKY_CONF" > "$tmp"
-    if ! grep -qF -- "$line" "$tmp"; then
+    if ! grep -qF -- "$first" "$tmp"; then
         rm -f "$tmp"
         bad "не нашёл конец секции conky.text (строку ]])"
         note "добавь руками в $CONKY_CONF"
         return 1
     fi
     mv "$tmp" "$CONKY_CONF"
-    ok "добавлено: $line"
+    ok "добавлено: $first"
     restart_conky
+    return 0
+}
+
+# Создать виджет с нуля.
+#
+# Раньше конфиг conky умел делать только bootstrap.sh, а widget лишь
+# правил готовый. Из-за этого на чистой системе образ look спотыкался
+# на шаге виджета: «конфига conky нет» — и человек оставался без
+# половины вида, хотя команда для неё есть.
+widget_init() {
+    if [ -f "$CONKY_CONF" ]; then
+        note "виджет уже настроен: $CONKY_CONF"
+        note "поменять вид: $0 widget --radius 12 --colour 1e1e2e"
+        return 0
+    fi
+
+    head1 "создание виджета"
+    require_tools conky
+
+    if would "создать конфиг conky и прописать автозапуск"; then
+        return 0
+    fi
+
+    mkdir -p "$CONKY_DIR"
+
+    # Имя сетевого интерфейса подставляем сразу: с чужим именем виджет
+    # молча показывал бы пустую строку вместо скорости.
+    local netif
+    netif=$(ip route show default 2>/dev/null | awk '{print $5; exit}')
+    if [ -z "$netif" ]; then
+        netif=$(ip -br link 2>/dev/null | awk '$1 ~ /^(wl|en)/ {print $1; exit}')
+    fi
+    if [ -z "$netif" ]; then
+        netif=eth0
+    fi
+
+    cat > "$CONKY_CONF" <<'CONKYEOF'
+conky.config = {
+    alignment = 'top_right',
+    gap_x = 60, gap_y = 60, minimum_width = 340,
+    own_window = true,
+    -- 'normal' + хинты: рекомендация conky-вики для GNOME
+    -- ('desktop' прячется за расширением DING)
+    own_window_type = 'normal',
+    own_window_transparent = false, own_window_argb_visual = true,
+    own_window_argb_value = 225, own_window_colour = '1e1e2e',
+    own_window_hints = 'undecorated,below,sticky,skip_taskbar,skip_pager',
+    double_buffer = true, update_interval = 1.0, border_inner_margin = 20,
+    use_xft = true, font = 'JetBrainsMono Nerd Font:size=10',
+    override_utf8_locale = true,
+    default_color = 'CDD6F4', color1 = '89B4FA', color2 = 'A6E3A1',
+}
+conky.text = [[
+${color1}${font JetBrainsMono Nerd Font:size=48}${time %H:%M}${font}${color}
+${font JetBrainsMono Nerd Font:size=12}${time %A, %d %B %Y}${font}
+
+${color1}СИСТЕМА${color}
+Процессор${goto 130}${cpu cpu0}%${alignr}${cpubar 6,110}
+Память${goto 130}${memperc}%${alignr}${membar 6,110}
+Диск${goto 130}${fs_used_perc /}%${alignr}${fs_bar 6,110 /}
+
+${color1}СЕТЬ${color}
+${if_up @NETIF@}Приём${goto 130}${downspeed @NETIF@}
+Передача${goto 130}${upspeed @NETIF@}
+${endif}${if_up tun0}${color2}VPN активен${color}${endif}
+]]
+CONKYEOF
+
+    sed -i "s/@NETIF@/$netif/g" "$CONKY_CONF"
+    ok "конфиг создан: $CONKY_CONF"
+    note "сетевой интерфейс: $netif"
+
+    # Автозапуск. xrandr перед стартом будит XWayland — без него conky
+    # на Wayland просто не виден (conky#1087).
+    mkdir -p "$HOME/.config/autostart"
+    cat > "$HOME/.config/autostart/conky.desktop" <<'AUTOEOF'
+[Desktop Entry]
+Type=Application
+Name=Conky
+Exec=bash -c 'xrandr >/dev/null 2>&1; sleep 3; exec conky -c "$HOME/.config/conky/main.conf"'
+Terminal=false
+X-GNOME-Autostart-enabled=true
+X-GNOME-Autostart-Delay=5
+AUTOEOF
+    ok "автозапуск прописан"
+
+    restart_conky
+    note "добавить погоду: $0 widget --add weather"
+    note "свой город:      $0 widget --city Санкт-Петербург"
     return 0
 }
 
@@ -4559,8 +4706,30 @@ cmd_widget() {
         overview_widget
         return 0
     fi
+    if [ "${1:-}" = "--init" ]; then
+        widget_init
+        return $?
+    fi
+    if [ "${1:-}" = "--city" ]; then
+        need_args "--city" 2 "$#"
+        head1 "город для погоды"
+        if would "запомнить город $2 и обновить скрипт погоды"; then
+            return 0
+        fi
+        weather_line_install "$2"
+        restart_conky
+        return 0
+    fi
     if [ "${1:-}" = "--add" ]; then
         need_args "--add" 2 "$#"
+        # Погода — единственный модуль, которому нужен помощник в ~/bin:
+        # conky сам в сеть не ходит. Ставим его до правки конфига,
+        # иначе виджет покажет пустую строку.
+        if [ "$2" = "weather" ]; then
+            if [ ! -x "$(weather_line_path)" ]; then
+                weather_line_install ""
+            fi
+        fi
         widget_add_module "$2"
         return $?
     fi
@@ -6170,7 +6339,9 @@ cmd_status() {
         note "новая вкладка: $(grep -c 'class="tile"' "$NEWTAB_DIR/index.html") ярлыков"
     fi
     if [ -f "$CONKY_LUA" ]; then
-        note "виджет:        $(grep -m1 'local RADIUS' "$CONKY_LUA" | tr -d ' ')"
+        # Раньше здесь печаталось склеенное "localRADIUS=12" — строка
+        # из кода как есть. Человеку нужно число, а не кусок Lua.
+        note "виджет:        скругление $(awk -F= '/local RADIUS/ { gsub(/ /, "", $2); print $2; exit }' "$CONKY_LUA")px"
     fi
 
     # Подсистемы, которых в срезе раньше не было вовсе
@@ -6307,6 +6478,18 @@ revert_panel() {
     if [ -n "$dtp_s" ]; then
         dconf write $DTP/panel-sizes "'$dtp_s'" 2>/dev/null
         ok "размеры панели восстановлены"
+    fi
+    local dtp_l
+    dtp_l=$(recall DTP_LENGTHS)
+    if [ -n "$dtp_l" ]; then
+        dconf write $DTP/panel-lengths "'$dtp_l'" 2>/dev/null
+        ok "длина панели восстановлена"
+    fi
+    local dtp_a
+    dtp_a=$(recall DTP_ANCHORS)
+    if [ -n "$dtp_a" ]; then
+        dconf write $DTP/panel-anchors "'$dtp_a'" 2>/dev/null
+        ok "привязка панели восстановлена"
     fi
     return 0
 }
@@ -6882,6 +7065,9 @@ panel — панель задач Dash to Panel
   desktop-kit panel --opacity N        прозрачность подложки 0..100
   desktop-kit panel --size N           высота панели в пикселях
   desktop-kit panel --transparent      полностью прозрачная подложка
+  desktop-kit panel --length N         длина панели, % ширины экрана
+  desktop-kit panel --float            стеклянная панель по центру (88%)
+  desktop-kit panel --full             вернуть во всю ширину
 
   Прозрачность в Dash to Panel задаётся ОДНА на все мониторы: отдельной
   настройки для каждого экрана нет, сколько ни выбирай монитор в его
@@ -6894,15 +7080,43 @@ EOF
 
 DTP="/org/gnome/shell/extensions/dash-to-panel"
 
+# Записать значение для монитора в JSON-настройку Dash to Panel.
+#
+# Расширение хранит их строками вида {"0":46}, по записи на монитор.
+# Пока панель не трогали руками, там пустой {} — и правка регуляркой
+# (как было раньше) не срабатывала вовсе: на чистой системе высота
+# панели просто не менялась, молча.
+panel_json_set() {
+    local json="$1"
+    local value="$2"
+    case "$json" in
+        ''|'{}'|'@as []')
+            printf '{"0":%s}' "$value"
+            return 0
+            ;;
+    esac
+    if printf '%s' "$json" | grep -q ':'; then
+        printf '%s' "$json" | sed "s/:[^,}]*/:$value/g"
+    else
+        printf '{"0":%s}' "$value"
+    fi
+    return 0
+}
+
 cmd_panel() {
     local opacity=""
     local size=""
+    local length=""
+    local anchor=""
 
     while [ $# -gt 0 ]; do
         case "$1" in
             --opacity)     need_args "--opacity" 2 "$#"; opacity="$2"; shift 2 ;;
             --size)        need_args "--size" 2 "$#"; size="$2"; shift 2 ;;
             --transparent) opacity=0; shift ;;
+            --length)      need_args "--length" 2 "$#"; length="$2"; shift 2 ;;
+            --float)       length=88; anchor="MIDDLE"; shift ;;
+            --full)        length=100; anchor="MIDDLE"; shift ;;
             -h|--help)     help_panel; return 0 ;;
             *) die "panel: неизвестный параметр $1" ;;
         esac
@@ -6914,13 +7128,16 @@ cmd_panel() {
 
     head1 "панель задач"
 
-    if [ -z "$opacity" ]; then
-        if [ -z "$size" ]; then
-            note "прозрачность: $(dconf read $DTP/trans-panel-opacity 2>/dev/null)"
-            note "своя прозрачность: $(dconf read $DTP/trans-use-custom-opacity 2>/dev/null)"
-            note "размеры: $(dconf read $DTP/panel-sizes 2>/dev/null)"
-            return 0
-        fi
+    if [ -z "$opacity" ] && [ -z "$size" ] && [ -z "$length" ]; then
+        note "прозрачность: $(dconf read $DTP/trans-panel-opacity 2>/dev/null)"
+        note "своя прозрачность: $(dconf read $DTP/trans-use-custom-opacity 2>/dev/null)"
+        note "размеры: $(dconf read $DTP/panel-sizes 2>/dev/null)"
+        note "длина: $(dconf read $DTP/panel-lengths 2>/dev/null)"
+        note "привязка: $(dconf read $DTP/panel-anchors 2>/dev/null)"
+        blank
+        note "стеклянная панель по центру: $0 panel --float --opacity 15"
+        note "во всю ширину обратно:      $0 panel --full"
+        return 0
     fi
 
     if [ -n "$opacity" ]; then
@@ -6944,6 +7161,34 @@ cmd_panel() {
         fi
     fi
 
+    if [ -n "$length" ]; then
+        if ! is_number "$length"; then
+            die "panel: длина — целое число 10..100 (процент ширины экрана)"
+        fi
+        if [ "$length" -lt 10 ] || [ "$length" -gt 100 ]; then
+            die "panel: длина — от 10 до 100 процентов"
+        fi
+        if would "длина панели $length% экрана"; then
+            :
+        else
+            local cur_len
+            cur_len=$(dconf read $DTP/panel-lengths 2>/dev/null | tr -d "'")
+            remember DTP_LENGTHS "$cur_len"
+            dconf write $DTP/panel-lengths "'$(panel_json_set "$cur_len" "$length")'" 2>/dev/null
+            if [ -n "$anchor" ]; then
+                local cur_anch
+                cur_anch=$(dconf read $DTP/panel-anchors 2>/dev/null | tr -d "'")
+                remember DTP_ANCHORS "$cur_anch"
+                dconf write $DTP/panel-anchors "'$(panel_json_set "$cur_anch" "\"$anchor\"")'" 2>/dev/null
+            fi
+            if [ "$length" = "100" ]; then
+                ok "панель во всю ширину"
+            else
+                ok "панель занимает $length% ширины, остальное — обои"
+            fi
+        fi
+    fi
+
     if [ -n "$size" ]; then
         if ! is_number "$size"; then
             die "panel: высота — целое число"
@@ -6953,15 +7198,13 @@ cmd_panel() {
         else
             local monitors
             monitors=$(dconf read $DTP/panel-sizes 2>/dev/null | tr -d "'")
-            if [ -z "$monitors" ]; then
-                bad "не прочитал текущие размеры панели"
-            else
-                remember DTP_SIZES "$monitors"
-                local updated
-                updated=$(echo "$monitors" | sed "s/:[0-9]\+/:$size/g")
-                dconf write $DTP/panel-sizes "'$updated'" 2>/dev/null
-                ok "высота панели: $size"
-            fi
+            remember DTP_SIZES "$monitors"
+            # На свежей системе здесь пустой '{}' — заменять регуляркой
+            # нечего, и высота молча не менялась. Пишем запись сами.
+            local updated
+            updated=$(panel_json_set "$monitors" "$size")
+            dconf write $DTP/panel-sizes "'$updated'" 2>/dev/null
+            ok "высота панели: $size"
         fi
     fi
 }
