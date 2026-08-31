@@ -263,6 +263,191 @@ overview_terminal() {
 }
 
 # =====================================================================
+#  look — готовые образы рабочего стола
+# =====================================================================
+#
+# Пресеты из presets_table настраивают ОДНУ подсистему: кнопки, углы,
+# виджет. Но вид рабочего стола — это не кнопки, а согласованный набор:
+# тема плюс значки плюс панель плюс виджет плюс терминал. Собирать его
+# вручную по семь команд, помня значения, — то самое занятие, ради
+# отмены которого скрипт и писался.
+#
+# look — это именованный набор таких команд. Каждый образ снят с живой
+# машины, а не придуман: то, что видно на скриншотах в README, ставится
+# одной строкой.
+#
+# Формат: имя|описание|команда|команда|...
+# Команды идут ровно теми словами, какими их набрал бы человек, и
+# выполняются через сам скрипт — значит логируются, откатываются и
+# уважают --dry-run наравне с ручным вводом.
+
+look_table() {
+    cat <<'EOF'
+work|тёмный рабочий стол: стеклянная панель, виджет справа, прозрачный терминал|theme Graphite-Dark --gtk4|icons Papirus-Dark|buttons default|corners --radius 12|panel --opacity 20 --size 46|widget --colour 1e1e2e --text ffffff --radius 12 --opacity 225|terminal --opacity 12
+night|то же, но темнее и строже: острые углы, глухая подложка|theme Graphite-Dark --gtk4|icons Papirus-Dark|buttons thin|corners --radius 0|panel --opacity 40 --size 42|widget --colour 11111b --text cdd6f4 --radius 0 --opacity 255|terminal --opacity 6
+paper|светлый день: мягкие углы, светлый виджет, непрозрачный терминал|theme Graphite-Light --gtk4|icons Papirus-Light|buttons default|corners --radius 10|panel --opacity 15 --size 44|widget --colour f2f2f2 --text 1e1e2e --radius 12 --opacity 235|terminal --opacity 0
+EOF
+}
+
+look_names() {
+    look_table | cut -d'|' -f1
+}
+
+help_look() {
+    cat <<'EOF'
+look — собрать весь вид рабочего стола одной командой
+
+  desktop-kit look              список образов
+  desktop-kit look ИМЯ          применить образ целиком
+  desktop-kit look ИМЯ --show   показать, из чего он состоит
+  desktop-kit look --dry-run ИМЯ  рассказать, ничего не меняя
+
+  Образ — это согласованный набор: тема, значки, кнопки, углы, панель,
+  виджет, терминал. Каждый снят с живой машины и показан на скриншотах
+  в README, так что видно, что получится.
+
+  Перед применением текущий вид сам сохраняется снимком before-look —
+  вернуться: desktop-kit profile load before-look
+
+  Обои образ НЕ трогает: они дело вкуса и лежат отдельно.
+  Сменить: desktop-kit wall, пополнить банк: desktop-kit wallpapers
+
+  Что нужно заранее: тема из образа (desktop-kit themes --install ИМЯ)
+  и расширение Dash to Panel для панели. Чего нет — скрипт назовёт
+  поимённо и сделает остальное.
+EOF
+}
+
+look_list() {
+    head1 "образы рабочего стола"
+    blank
+    local nm desc rest
+    look_table | while IFS='|' read -r nm desc rest; do
+        printf '  %-8s %s\n' "$nm" "$desc"
+    done
+    blank
+    note "применить:  $0 look work"
+    note "из чего:    $0 look work --show"
+    note "свой вид:   $0 profile save имя"
+}
+
+look_show() {
+    local name="$1"
+    local line
+    line=$(look_table | awk -F'|' -v n="$name" '$1 == n')
+    if [ -z "$line" ]; then
+        bad "образа '$name' нет"
+        note "список: $0 look"
+        return 1
+    fi
+    head1 "образ $name"
+    note "$(printf '%s' "$line" | cut -d'|' -f2)"
+    blank
+    printf '%s' "$line" | cut -d'|' -f3- | tr '|' '\n' | while read -r step; do
+        if [ -n "$step" ]; then
+            printf '  %s %s\n' "$0" "$step"
+        fi
+    done
+    blank
+    note "применить: $0 look $name"
+    return 0
+}
+
+look_apply() {
+    local name="$1"
+    local line
+    line=$(look_table | awk -F'|' -v n="$name" '$1 == n')
+    if [ -z "$line" ]; then
+        bad "образа '$name' нет"
+        note "список: $0 look"
+        return 1
+    fi
+
+    head1 "образ $name"
+    note "$(printf '%s' "$line" | cut -d'|' -f2)"
+
+    if [ "$DRY_RUN" = "1" ]; then
+        blank
+        note "было бы выполнено:"
+        printf '%s' "$line" | cut -d'|' -f3- | tr '|' '\n' | while read -r step; do
+            if [ -n "$step" ]; then
+                printf '    %s\n' "$step"
+            fi
+        done
+        return 0
+    fi
+
+    # Страховка до первой правки: образ меняет сразу семь подсистем, и
+    # «не понравилось, верни» без снимка означало бы семь откатов.
+    profile_save "before-look" >/dev/null 2>&1
+    note "нынешний вид сохранён снимком before-look"
+    blank
+
+    local ok_n=0
+    local bad_n=0
+    local failed=""
+    local step
+    # Читаем через here-string, а не через конвейер: тело цикла должно
+    # менять счётчики в ЭТОЙ оболочке, а не в порождённой подоболочке.
+    while IFS= read -r step; do
+        if [ -z "$step" ]; then
+            continue
+        fi
+        if bash "$SELF" --yes --quiet $step >/dev/null 2>&1; then
+            ok "$step"
+            ok_n=$((ok_n + 1))
+        else
+            bad "$step"
+            bad_n=$((bad_n + 1))
+            failed="$failed
+    $0 $step"
+        fi
+    done <<EOF
+$(printf '%s' "$line" | cut -d'|' -f3- | tr '|' '\n')
+EOF
+
+    blank
+    if [ "$bad_n" = "0" ]; then
+        ok "образ '$name' применён целиком"
+    else
+        ok "применено шагов: $ok_n, не вышло: $bad_n"
+        note "не прошли — запусти по одному, чтобы увидеть причину:$failed"
+        note "чаще всего не хватает темы или расширения Dash to Panel"
+    fi
+    note "вернуть прежний вид: $0 profile load before-look"
+    note "обои образ не трогал: $0 wall"
+    if [ "$bad_n" -gt 0 ]; then
+        return 1
+    fi
+    return 0
+}
+
+cmd_look() {
+    local name=""
+    local show=0
+    while [ $# -gt 0 ]; do
+        case "$1" in
+            --show)    show=1; shift ;;
+            --list)    look_list; return 0 ;;
+            -h|--help) help_look; return 0 ;;
+            -*) die "look: неизвестный параметр $1" ;;
+            *)  name="$1"; shift ;;
+        esac
+    done
+
+    if [ -z "$name" ]; then
+        look_list
+        return 0
+    fi
+    if [ "$show" = "1" ]; then
+        look_show "$name"
+        return $?
+    fi
+    look_apply "$name"
+    return $?
+}
+
+# =====================================================================
 #  profile — снимок оформления целиком
 # =====================================================================
 #
@@ -4601,7 +4786,7 @@ terminal — GNOME Terminal: прозрачность, шрифт, палитр�
   ВАЖНО: gnome-terminal-server переживает закрытие всех окон и держит
   старые настройки. После правки: pkill -x gnome-terminal-server
 
-  Tabby настраивается не здесь — у него свой конфиг, см. modules/tabby.md
+  Tabby настраивается не здесь — у него свой конфиг, см. docs/tabby.md
 EOF
 }
 
@@ -4790,7 +4975,7 @@ newtab — своя страница новой вкладки в Chrome
   запоминается в icons.json и не теряется, даже если база потом промолчит.
 
   Подключение к новой вкладке требует расширения — Chrome иначе не даёт.
-  Подробности: modules/chrome.md
+  Подробности: docs/chrome.md
 EOF
 }
 
@@ -7767,7 +7952,7 @@ PY
 }
 
 SELFTEST_ONLY=""
-SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes profile refresh tune report presets overview help"
+SELFTEST_GROUPS="core buttons corners theme icons font widget terminal newtab wall wallpapers keys panel app serve revert themes look profile refresh tune report presets overview help"
 
 selftest_full() {
     note "песочница с подставными gsettings, dconf, curl и systemd"
@@ -8788,6 +8973,82 @@ st_themes() {
 
 # ------------------------------------------------- согласованность справки
 
+st_look() {
+    t_group "look: образы рабочего стола"
+    sandbox_new
+
+    sandbox_run look
+    t_rc "список образов выводится" 0
+    t_out_has "в списке есть work" "work"
+    t_out_has "в списке есть paper" "paper"
+
+    sandbox_run look work --show
+    t_rc "состав образа показан" 0
+    t_out_has "в составе есть тема" "theme Graphite-Dark"
+    t_out_has "в составе есть панель" "panel"
+
+    sandbox_run look НетТакогоОбраза
+    t_rc_not "неизвестный образ отвергнут"
+    t_out_has "подсказан список" "look"
+
+    # Таблица должна быть заполнена: имя, описание и хотя бы одна команда
+    local broken
+    broken=$(look_table | awk -F'|' 'NF < 3 || $1 == "" || $2 == "" { print }')
+    t_eq "все строки таблицы образов заполнены" "" "$broken"
+
+    local dups
+    dups=$(look_names | sort | uniq -d)
+    t_eq "имена образов не повторяются" "" "$dups"
+
+    # Каждая команда образа должна быть настоящей командой скрипта
+    local known
+    known=$(sed -n '/^case "$COMMAND" in/,/^esac/p' "$SELF" \
+            | grep -oE '^    [a-z]+[|)]' | tr -d ' |)')
+    local unknown=""
+    local first
+    local step
+    while IFS= read -r step; do
+        if [ -z "$step" ]; then
+            continue
+        fi
+        first=$(printf '%s' "$step" | awk '{print $1}')
+        if ! printf '%s\n' "$known" | grep -qxF "$first"; then
+            unknown="$unknown $first"
+        fi
+    done <<EOF
+$(look_table | cut -d'|' -f3- | tr '|' '\n')
+EOF
+    t_eq "все шаги образов — существующие команды" "" "$unknown"
+
+    # Проверочный прогон не должен ничего трогать
+    sb_set org.gnome.desktop.interface gtk-theme "Yaru"
+    sandbox_run --dry-run look work
+    t_rc "проверочный прогон отработал" 0
+    t_eq "проверочный прогон тему не менял" "Yaru" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_nofile "проверочный прогон снимок не делал" \
+        "$SB/.local/state/desktop-kit/profiles/before-look"
+
+    # Живое применение: тему кладём заранее, иначе шаг темы честно упадёт
+    mkdir -p "$SB/.themes/Graphite-Dark/gtk-3.0" \
+             "$SB/.local/share/icons/Papirus-Dark"
+    printf '[Icon Theme]\nName=Papirus-Dark\n' \
+        > "$SB/.local/share/icons/Papirus-Dark/index.theme"
+    printf 'button.titlebutton { min-width: 24px; }\n' \
+        > "$SB/.themes/Graphite-Dark/gtk-3.0/gtk.css"
+
+    sandbox_run look work
+    t_out_has "образ назван вслух" "work"
+    t_file "страховочный снимок сделан" \
+        "$SB/.local/state/desktop-kit/profiles/before-look/settings.txt"
+    t_eq "тема из образа применилась" "Graphite-Dark" \
+        "$(sb_get org.gnome.desktop.interface gtk-theme)"
+    t_out_has "сказано, как вернуть" "before-look"
+    t_out_has "про обои предупреждено" "обои"
+
+    sandbox_drop
+}
+
 st_profile() {
     t_group "profile: снимки оформления"
     sandbox_new
@@ -9124,8 +9385,12 @@ st_help() {
     t_group "справка: покрытие всех команд"
     sandbox_new
 
-    local all_cmds="buttons corners theme icons font widget terminal newtab"
-    all_cmds="$all_cmds wallpapers wall serve app keys panel audit status selftest revert"
+    # Список берём из самого диспетчера, а не переписываем руками: иначе
+    # каждая новая команда появляется без справки и тест этого не видит.
+    # Ровно так и случилось с themes, refresh, tune и profile.
+    local all_cmds
+    all_cmds=$(sed -n '/^case "\$COMMAND" in/,/^esac/p' "$SELF"                | grep -oE '^    [a-z]+[|)]'                | tr -d ' |)'                | grep -vE '^(help|version)$'                | tr '
+' ' ')
 
     local c
     local missing=""
@@ -9213,6 +9478,7 @@ desktop-kit $VERSION — настройка десктопа Ubuntu 24.04 / GNOM
   keys         горячие клавиши
   panel        панель задач: прозрачность, высота
   app          своя тема для одного приложения
+  look         собрать весь вид одной командой: work, night, paper
   profile      сохранить нынешний вид целиком и вернуться к нему потом
   audit        полный снимок системы в markdown
   status       что сейчас применено
@@ -9338,6 +9604,7 @@ cmd_help() {
         app)        help_app ;;
         themes)     help_themes ;;
         profile)    help_profile ;;
+        look)       help_look ;;
         refresh)    help_refresh ;;
         tune)       help_tune ;;
         keys)       help_keys ;;
@@ -9412,6 +9679,7 @@ case "$COMMAND" in
     serve)      cmd_serve "$@" ;;
     themes)     cmd_themes "$@" ;;
     profile)    cmd_profile "$@" ;;
+    look)       cmd_look "$@" ;;
     refresh)    cmd_refresh "$@" ;;
     tune)       cmd_tune "$@" ;;
     keys)       cmd_keys "$@" ;;

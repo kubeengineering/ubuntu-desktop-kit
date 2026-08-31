@@ -101,7 +101,7 @@ Hyprland работает только на Wayland и в Ubuntu 24.04 отсу�
 
 Соблазн подключить свою новую вкладку через **Настройки → Запуск Chrome → Открывать заданные страницы**: адрес вписывается в одно поле, расширение не нужно. Но эти три режима взаимоисключающие — выбрав «Заданные страницы», теряешь **«Ранее открытые вкладки»**, и после каждого перезапуска браузер стартует пустым.
 
-Правильный путь — расширение (см. [modules/chrome.md](../modules/chrome.md)), а запуск оставить на `chrome://settings/onStartup` → **Continue where you left off**.
+Правильный путь — расширение (см. [chrome.md](chrome.md)), а запуск оставить на `chrome://settings/onStartup` → **Continue where you left off**.
 
 Если вкладки не восстанавливаются и при верной настройке запуска, второе место — `chrome://settings/content/siteData`, пункт **Delete data sites have saved to your device when you close all windows**. В свежих версиях он живёт именно там, а **не** в разделе cookie: `chrome://settings/cookies` теперь только про третьесторонние.
 

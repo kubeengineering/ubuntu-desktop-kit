@@ -64,7 +64,7 @@ Dash to Panel: панель на трёх мониторах, размер 51, �
 
 **GNOME Terminal** — прозрачность 15 %, цвета не из темы, палитра из pywal (`background=#152231`).
 
-**Tabby 1.0.234** — `vibrancy: true`, `disableGPU: true` (прозрачности не мешает, вопреки распространённому утверждению), Custom CSS по [modules/tabby.md](../modules/tabby.md) с `--term-alpha: 0.30`. Около 40 SSH-профилей стендов, сгруппированных.
+**Tabby 1.0.234** — `vibrancy: true`, `disableGPU: true` (прозрачности не мешает, вопреки распространённому утверждению), Custom CSS по [tabby.md](tabby.md) с `--term-alpha: 0.30`. Около 40 SSH-профилей стендов, сгруппированных.
 
 ## Обои
 
