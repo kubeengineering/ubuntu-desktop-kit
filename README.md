@@ -4,6 +4,8 @@
 
 ![Рабочий стол](docs/screenshots/look-work.png)
 
+**Система уже настроена, нужен только инструмент:**
+
 ```bash
 curl -fsSL https://raw.githubusercontent.com/kubeengineering/ubuntu-desktop-kit/main/tools/install-design.sh | bash
 ```
@@ -12,7 +14,19 @@ curl -fsSL https://raw.githubusercontent.com/kubeengineering/ubuntu-desktop-kit/
 design look work
 ```
 
-Две команды: первая ставит запускалку, вторая собирает вид со скриншота выше — тему, значки, кнопки заголовка, стеклянную панель, виджет и прозрачный терминал. Не понравилось — `design profile load before-look` вернёт как было.
+Первая команда ставит запускалку, вторая собирает вид со скриншота выше: тему, значки, кнопки заголовка, стеклянную панель, виджет и прозрачный терминал. Не понравилось — `design profile load before-look` вернёт как было.
+
+**Система только что установлена, нет ещё ничего:**
+
+```bash
+wget https://raw.githubusercontent.com/kubeengineering/ubuntu-desktop-kit/main/bootstrap.sh && bash bootstrap.sh
+```
+
+Тогда сначала приедут пакеты, шрифт и расширения GNOME, а вид соберётся в конце — той же командой `look`. Пароль спросят один раз, дальше вопросов не будет. Подробности — в [docs/bootstrap.md](docs/bootstrap.md).
+
+Вот что получается на выходе: система, установленная двадцать минут назад, после одного прогона `bootstrap.sh`.
+
+![Результат раскатки с нуля](docs/screenshots/from-scratch.png)
 
 ---
 
