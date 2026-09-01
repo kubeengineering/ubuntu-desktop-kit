@@ -4,6 +4,13 @@
 
 ## Банк тем
 
+```bash
+design themes                        что есть в банке
+design themes --install Catppuccin   скачать и собрать
+design themes --check Catppuccin-Dark совместима ли с нашими кнопками
+design theme Catppuccin-Dark --gtk4  применить, включая файловый менеджер
+```
+
 `themes` показывает двадцать одну тему, `themes --install ИМЯ` собирает и ставит. К темам vinceliuice (Graphite, Orchis, Fluent и прочие) добавлены авторские, собранные тем же поиском по звёздам: **Catppuccin**, **Tokyonight**, **Gruvbox**, **Everforest**, **Rose-Pine**, **Nordic**, **Sweet**, **Dracula**, **Mono**, **Flat-Remix**.
 
 Каждая семья пакует себя по-своему, поэтому установщик больше не требует `./install.sh`, а разбирает четыре раскладки по порядку: установщик в корне, установщик в `themes/` (так лежат все палитры Fausto-Korpsvart), `Makefile`, и наконец тема, которая просто лежит готовой — либо `index.theme` в корне (Nordic, Dracula), либо по каталогу на вариант (Mono). Скопированная вручную тема называется по `Name=` из `index.theme`, а если не хватает только `make`, так и говорится — вместо невнятного «непонятно, как ставится».
@@ -15,6 +22,13 @@
 Скачивание переживает обрывы. У крупных тем `git clone` регулярно падает с `RPC failed; curl 92 HTTP/2 stream was not closed cleanly`, хотя сеть жива. Сначала пробуем обычный клон, затем тот же клон на HTTP/1.1, а если и он не дожил — тянем архив через `curl` с докачкой и повторами: история нам не нужна, только рабочее дерево, и выходит легче.
 
 ## Банк наборов значков
+
+```bash
+design icons --bank                  что есть, со звёздами
+design icons --get Nordzy Zafiro     скачать и поставить
+design icons Nordzy-dark             примерить
+design icons --clean                 снести скачанные исходники
+```
 
 Стоковые Adwaita и Yaru выглядят пресно, а искать наборы по гитхабу каждый раз лень. `icons --bank` показывает двадцать живых наборов с числом звёзд и пометкой, что уже стоит. Кроме привычных Papirus, WhiteSur и Tela там авторские, которые ценит rice-сообщество: **Flat-Remix** (36 расцветок), **Zafiro** (светлый минимализм), **Nordzy** (палитра Nord), **Dracula**, **Tela-circle**, **MoreWaita**, **Vimix**, **Gruvbox-Plus**, **Candy**. `icons --get Nordzy Zafiro` скачивает и ставит их в `~/.local/share/icons`, после чего набор примеряется обычным `icons ИМЯ`.
 
