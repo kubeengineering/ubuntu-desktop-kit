@@ -8844,6 +8844,30 @@ st_widget() {
     t_rc_not "без конфига conky команда отказывает"
     t_out_has "путь к конфигу назван" "conky"
 
+
+    # Создание с нуля: раньше конфиг умел делать только bootstrap,
+    # и образ look спотыкался на чистой системе.
+    rm -rf "$SB/.config/conky" "$SB/.config/autostart"
+    sandbox_run widget --init
+    t_rc "виджет создан с нуля" 0
+    t_file "конфиг conky появился" "$SB/.config/conky/main.conf"
+    t_file "автозапуск прописан" "$SB/.config/autostart/conky.desktop"
+    t_has "в автозапуске будят XWayland" "$SB/.config/autostart/conky.desktop" "xrandr"
+    t_hasnt "заглушка интерфейса не осталась" "$SB/.config/conky/main.conf" "@NETIF@"
+
+    sandbox_run widget --init
+    t_rc "повторное создание не ломается" 0
+    t_out_has "сказано, что виджет уже есть" "уже настроен"
+
+    sandbox_run widget --city Novosibirsk
+    t_rc "город принят" 0
+    t_file "помощник погоды создан" "$SB/bin/weather-line"
+    t_has "город попал в помощник" "$SB/bin/weather-line" "Novosibirsk"
+
+    sandbox_run widget --add weather
+    t_has "заголовок погоды в конфиге" "$SB/.config/conky/main.conf" "ПОГОДА"
+    t_has "вызов помощника в конфиге" "$SB/.config/conky/main.conf" "weather-line"
+
     sandbox_drop
 }
 
@@ -9068,6 +9092,22 @@ st_panel() {
 
     sandbox_run panel --opacity 300
     t_rc_not "прозрачность больше 100 отвергнута"
+
+    # Плавающая панель. На свежей системе длина и привязка — пустой
+    # '{}', и раньше правка регуляркой молча ничего не делала.
+    printf "/org/gnome/shell/extensions/dash-to-panel/panel-lengths '{}'
+"         >> "$SB_STORE/dconf"
+    sandbox_run panel --float
+    t_eq "длина панели записана в пустой JSON" '{"0":88}'         "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/panel-lengths)"
+    t_eq "панель встала по центру" '{"0":"MIDDLE"}'         "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/panel-anchors)"
+
+    sandbox_run panel --full
+    t_eq "панель вернулась во всю ширину" '{"0":100}'         "$(sb_dconf /org/gnome/shell/extensions/dash-to-panel/panel-lengths)"
+
+    sandbox_run panel --length 5
+    t_rc_not "слишком короткая панель отвергнута"
+    sandbox_run panel --length сто
+    t_rc_not "нечисловая длина отвергнута"
 
     sandbox_run revert panel
     t_eq "размеры панели вернулись" '{"0":48}' \
