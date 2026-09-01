@@ -695,6 +695,13 @@ EOF
         cp "$src/files"/*.env "$STATE_DIR/" 2>/dev/null
     fi
 
+    # Конфиг виджета вернулся, но сам виджет читает его только при
+    # старте — без перезапуска человек увидел бы прежний вид и решил,
+    # что снимок восстановился наполовину.
+    if [ -f "$src/files/conky-main.conf" ]; then
+        restart_conky
+    fi
+
     ok "вид возвращён: ключей $applied, файлов $files"
     if [ -n "$missing" ]; then
         blank
