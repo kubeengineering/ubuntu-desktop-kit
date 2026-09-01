@@ -1086,8 +1086,8 @@ icons_get() {
         # и сам поднимает sudo — то есть переписывает системный набор.
         # Нам это не нужно: DESTDIR уводит его в домашний каталог, а у
         # остальных установщиков эта переменная просто не используется.
-        if [ -x "$src/install.sh" ]; then
-            ( cd "$src"; DESTDIR="$HOME/.local/share/icons" ./install.sh >>"$LOG_FILE" 2>&1 )
+        if [ -f "$src/install.sh" ]; then
+            ( cd "$src"; DESTDIR="$HOME/.local/share/icons" bash ./install.sh >>"$LOG_FILE" 2>&1 )
         elif [ -f "$src/Makefile" ] && have make; then
             ( cd "$src"; make PREFIX="$HOME/.local" install >>"$LOG_FILE" 2>&1 )
         else
@@ -4036,18 +4036,21 @@ theme_build() {
     # отвечать некому), а потом сами применяют тему и переделывают
     # ~/.config/gtk-4.0/gtk.css в симлинк внутрь темы — вместе с
     # нашими кнопками и углами. С ним они только собирают.
-    if [ -x "$src/install.sh" ]; then
+    # Проверяем -f, а не -x, и зовём через bash: из архива установщик
+    # приезжает без бита исполняемости, и «нет установщика» было бы
+    # неправдой — он есть, просто права другие.
+    if [ -f "$src/install.sh" ]; then
         if [ -n "$variant" ]; then
-            ( cd "$src"; BATCH_MODE=true ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
+            ( cd "$src"; BATCH_MODE=true bash ./install.sh -c "$variant" >>"$LOG_FILE" 2>&1 )
         else
-            ( cd "$src"; BATCH_MODE=true ./install.sh >>"$LOG_FILE" 2>&1 )
+            ( cd "$src"; BATCH_MODE=true bash ./install.sh >>"$LOG_FILE" 2>&1 )
         fi
         return 0
     fi
 
-    if [ -x "$src/themes/install.sh" ]; then
+    if [ -f "$src/themes/install.sh" ]; then
         note "установщик лежит в themes/ — запускаю оттуда"
-        ( cd "$src/themes"; BATCH_MODE=true ./install.sh >>"$LOG_FILE" 2>&1 )
+        ( cd "$src/themes"; BATCH_MODE=true bash ./install.sh >>"$LOG_FILE" 2>&1 )
         return 0
     fi
 
