@@ -95,6 +95,8 @@ wget https://raw.githubusercontent.com/kubeengineering/ubuntu-desktop-kit/main/b
 | `keys` | горячие клавиши |
 | `serve` | отдать локальную апку по `http://localhost` |
 | `app` | своя тема для одного приложения |
+| `tune` | мастер: проводит по настройкам и спрашивает про каждую |
+| `refresh` | пересобрать правила, если их снесла установка темы |
 | `audit` / `status` | снимок системы и что сейчас применено |
 | `selftest` | проверить себя на этой машине |
 | `revert` | вернуть как было |
