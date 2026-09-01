@@ -72,6 +72,35 @@ trap 'kill "$SUDO_PID" 2>/dev/null' EXIT
 c "Пакеты из репозиториев"
 APT="sudo apt-get -o DPkg::Lock::Timeout=600"
 
+# Свежепоставленная Ubuntu первые минуты сама тянет обновления и держит
+# блокировки apt. Раньше скрипт в этот момент падал с «нет сети», хотя
+# сеть была в полном порядке — просто очередь занята. Ждём и говорим,
+# чего ждём: молчащий скрипт выглядит зависшим.
+wait_for_apt() {
+    local waited=0
+    local locks="/var/lib/dpkg/lock-frontend /var/lib/apt/lists/lock /var/lib/dpkg/lock"
+    while sudo fuser $locks >/dev/null 2>&1; do
+        if [ "$waited" = "0" ]; then
+            wr "система сама ставит обновления — жду, пока освободит apt"
+        elif [ $((waited % 60)) = "0" ]; then
+            wr "всё ещё жду, прошло $((waited / 60)) мин"
+        fi
+        sleep 10
+        waited=$((waited + 10))
+        if [ "$waited" -ge 900 ]; then
+            no "apt занят больше пятнадцати минут — что-то не так"
+            echo "    Посмотри, кто держит: ps aux | grep -E 'apt|dpkg'"
+            return 1
+        fi
+    done
+    if [ "$waited" -gt 0 ]; then
+        ok "apt освободился (ждали $waited с)"
+    fi
+    return 0
+}
+
+wait_for_apt || exit 1
+
 if ! $APT update --error-on=any >>"$LOG" 2>&1; then
     no "apt update не прошёл — нет сети, captive portal или система ещё ставит обновления первого запуска"
     echo "    Подключи сеть, подожди пару минут и запусти снова. Лог: $LOG"
@@ -103,6 +132,7 @@ PKGS=(
     fonts-jetbrains-mono
     copyq gnome-sushi fzf zoxide
 )
+wait_for_apt || exit 1
 if $APT install -y "${PKGS[@]}" >>"$LOG" 2>&1; then
     ok "установлены все ${#PKGS[@]}"
 else
