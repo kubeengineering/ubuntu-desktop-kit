@@ -4572,7 +4572,7 @@ widget_add_module() {
         return 1
     fi
     if [ ! -f "$CONKY_CONF" ]; then
-        die "конфига conky нет: $CONKY_CONF"
+        die "виджета ещё нет — создать: $0 widget --init"
     fi
     if ! grep -q 'conky.text' "$CONKY_CONF"; then
         bad "в конфиге нет секции conky.text — добавить некуда"
@@ -4766,7 +4766,7 @@ cmd_widget() {
         die "widget: радиус — целое число"
     fi
     if [ ! -f "$CONKY_CONF" ]; then
-        die "конфига conky нет: $CONKY_CONF"
+        die "виджета ещё нет — создать: $0 widget --init"
     fi
 
     head1 "виджет conky (радиус ${radius}px)"
